@@ -22,11 +22,12 @@ a small LAN cluster of four Ubuntu machines; yours will differ.
 | 8 | Toward an operating system | 8a ✅ 8b ✅ 8c ⬜ | beta, a byte computer with a monitor: 16,384 of them, 1.3 × 10^9 instructions/s |
 | 9 | Real 1-bit hardware (FPGA) | ⬜ | |
 | 10 | Superoptimizer | ✅ | every library building block provably shortest; full adder 28 → 19, sort 2× faster |
-| 11 | Gamma: a world of cells on the cube | 11a ✅ 11b–11e ⬜ | light and minerals on a 3-D torus of up to 65,536 voxels |
+| 11 | Gamma: a world of cells on the cube | 11a ✅ 11b ✅ 11c–11e ⬜ | cells that are NAND circuits evolve from a random soup; 13,300 ticks/s for 32,768 voxels |
 | – | ~~Control flow with lane masks~~ | parked | needs a new instruction (see the end) |
 
-**Open:** 11b (the cells), 10 (optimize for the compiler's cost, not only the length), 7g (one
-cube across the cluster), 5c (AVX-512), 8c (more memory, networked betas), 9 (FPGA).
+**Open:** gamma's ecology (make the cells' senses pay) and 11c (a live view), 10 (optimize for
+the compiler's cost, not only the length), 7g (one cube across the cluster), 5c (AVX-512), 8c (more
+memory, networked betas), 9 (FPGA).
 
 ## 1. Reference machine ✅
 
@@ -780,7 +781,7 @@ floor. One tick:
   forms under whatever is there.
 - **minerals** diffuse up from the floor. The floor gets the maximum and the sun plane 0. Every
   other voxel gets (2m + its 6 neighbours) / 8, rounded down.
-- `occ` (something is there) is set by the host for now. The cells of 11b will set it.
+- `occ` (something is there) was set by the host in 11a. Since 11b the cells are what is there.
 
 `gamma_step()` in plain C is the definition. `gen_gamma()` is the same tick as one program and is
 checked against it after every tick.
@@ -850,9 +851,87 @@ Next: 11b, the cells. The link masks are 11 % of a tick and are recomputed every
 from the host, like the NTT's twiddle factors, they would cost nothing, but that only matters until
 11b's cells (about 40,000 instructions each) dwarf them.
 
-### 11b–11e ⬜
+### 11b. Cells that evolve from a random soup ✅
 
-- 11b cells: genome, energy, division and mutation, death; a hand-written plant that survives.
+A voxel now holds a cell or nothing. A cell is 32 NAND gates over 32 senses: a constant, 3 random
+bits, which neighbours hold a cell, 2 signal bits from each, the top bits of its energy, light and
+minerals, and "just born". They run in order every tick, in place, so wiring alone gives memory.
+Gates 26–27 are the signals the neighbours see, 28 asks to divide, 29–31 give the direction.
+Every rule is at the top of [src/gamma.h](src/gamma.h).
+
+**Division is physics, and nothing is hand-written** (the decision is in
+[docs/GAMMA.md](docs/GAMMA.md)). A cell with energy 32 or more asks; an empty voxel grants the first
+cell asking for it, by direction, and the cell learns it in the same tick (one cut: the grant is
+read in the tick it is computed). For the next 32 ticks both are busy. The parent's genome turns by
+one gate per tick and the new cell takes that gate in at its end, so nothing in lockstep has to
+compute an address: the copy is one multiplexer per genome bit and 12 reads over one link. Each
+gate copied flips one bit with probability 1/64, from the new cell's own dice (xorshift32 in every
+voxel). Energy: light/32 + minerals/512 in, 1 out, at most 255. A cell dies with nothing left or by
+chance (1/2048 per tick) and gives back 512 minerals; a new cell dies with its parent.
+
+One tick of the 32 × 32 × 32 world:
+
+| part | instructions |
+|---|---:|
+| where am I | 616 |
+| dice (xorshift32) | 488 |
+| neighbour reads (122 bits, 36 each) | 4,392 |
+| grants | 583 |
+| partner reads: the other one of a division, across any of the 15 dimensions (22 bits) | 2,683 |
+| **the gates: 64 inputs, each a 64-way select** | **33,964** |
+| energy and state | 1,403 |
+| genome copy | 3,437 |
+| light | 286 |
+| minerals | 1,828 |
+| register copies | 164 |
+| **one tick** | **49,844**, in 3 segments |
+
+The brain is two thirds of a tick: in lockstep every voxel reads its own addresses, so each gate
+input is a tree of 63 multiplexers. 16 threads of the i9-12900K (cluster, idle priority) ran
+13,300 ticks/s for 32,768 voxels over a million ticks: 75 µs per tick, 4.4 × 10^8 voxel updates/s,
+21.7 T.
+
+A million ticks from a soup of 10 % random cells (`alpha gamma --ticks 1000000`, seed 1):
+
+| tick | cells | dividing | genomes | asking | cells in z 0–7 / 24–31 |
+|---:|---:|---:|---:|---:|---:|
+| 100 | 6,373 | 2,673 | 4,237 | 25.7 % | 1,910 / 2,227 |
+| 100,000 | 6,210 | 199 | 3,385 | 89.6 % | 2,784 / 3,426 |
+| 1,000,000 | 6,235 | 203 | 3,433 | 94.1 % | 3,035 / 3,200 |
+
+- Life fills the 3 sunlit layers and the 4 mineral-rich ones above the floor; the 24 between stay
+  empty. Each layer of cells halves the light (255, 127, 63, 31), and below 32 there is nothing to
+  gain: the cells shade themselves into a canopy 3 layers deep.
+- Selection works: the share of free cells that ask to divide rose from 26 % to 94 %.
+- But the winner is blind. A voxel freed by a death goes to whoever already points at it; a cell
+  that senses the gap and turns to it comes one tick late, and asking costs nothing. About 0.1 %
+  of the requests point at an empty voxel, while 5 % of the neighbours are empty.
+- About 3,400 distinct genomes among 6,000 cells, the most common at 0.2 %: mostly neutral drift,
+  since most gates do not matter to a cell that always asks.
+
+Done: `test_gamma`, 45 checks:
+- the 11a checks;
+- a hand-written cell (it exists only in the tests) that divides upwards:
+  - the request, the grant and the energy split;
+  - 32 ticks of copying, with the mutations replayed from the new cell's dice;
+  - the parent's genome back in place, and "born" for one tick;
+- grant priority;
+- starving, and the minerals given back;
+- a new cell dying with its parent;
+- a soup that gets going by itself;
+- the reference cube and every engine against plain C, from random states of everything (any mix of alive, busy, partner, counter, ...);
+- compiled code against plain C after every tick, on 12 shapes, from random states and from soups, with 3 and 5 threads among them.
+
+The whole suite is 2,634 checks under gcc. Four injected bugs were all caught, with 13–15 failures each, each naming the part that differs:
+- the mutation position read one bit too low;
+- the parent keeping all its energy;
+- plain C forgetting that a new cell dies with its parent;
+- requests that ignore the energy minimum.
+
+Next, the ecology: make the senses pay. Make asking cost energy, make energy scarcer, and later let cells eat or feed each other.
+
+### 11c–11e ⬜
+
 - 11c `alpha gamma --serve`: a live page of the cube; click a cell to see its circuit.
 - 11d the twin world across the 16th dimension: butterfly and control modes.
 - 11e AVX-512 (5c), the world across the cluster (7g).

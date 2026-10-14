@@ -11,8 +11,8 @@ A computer with a **1-bit opcode and two instructions**: `NAND` (RR = !(RR & cel
   permutation, multiply polynomials by NTT and run Game of Life on one 8192 × 8192 board.
 - **A computer built out of NAND:** beta, an 8-bit machine with a monitor that loads and runs
   programs; 16,384 of them run at once.
-- **A world:** gamma, light and minerals in a 3-D torus of voxels, the start of an artificial-life
-  world whose cells will be NAND circuits.
+- **A world:** gamma, a 3-D torus of voxels with light and minerals, and cells in it that are
+  NAND circuits and evolve from a soup of random genomes.
 - **A superoptimizer** that proves programs shortest: the library's full adder went from 28
   instructions to 19, and nothing shorter exists.
 
@@ -84,9 +84,9 @@ bin/alpha beta asm examples/beta/fib.bs           beta assembly: addresses, byte
 bin/alpha beta monitor                            the monitor in beta's ROM
 bin/alpha beta bench                              beta steps per second, 1 and all threads
 
-bin/alpha gamma                                   gamma: a 32 x 32 x 32 world on the cube, light and
-                                                  minerals, checked against plain C, then timed
-bin/alpha gamma --size 64,32,32 --show            65,536 voxels; a slice through the world
+bin/alpha gamma                                   gamma: a 32 x 32 x 32 world of cells from a random
+                                                  soup, checked against plain C, then a census
+bin/alpha gamma --ticks 1000000 --show            a million ticks of evolution; a slice at the end
 
 bin/alpha super "RR = RR ^ x"                     the shortest NAND/STO program, proven (7 here)
 bin/alpha super "s{a,b} = a ^ b ^ c; c = a&b | a&c | b&c"   a full adder: 19, nothing shorter
@@ -151,8 +151,9 @@ src/benes.c      switch settings for any permutation of the 512 machines (Beneš
 src/cubedemo.c   alpha cube: every cube operation checked and timed
 src/beta.c       beta: emulator, assembler, monitor, the CPU as a NAND/STO program, host ports
 src/betacmd.c    alpha beta: asm, monitor, run, bench
-src/gamma.c      gamma: the world in plain C, and as one NAND/STO program for the cube
-src/gammacmd.c   alpha gamma: the world checked against plain C, then timed
+src/gamma.c      gamma: the world and its cells in plain C, and as one NAND/STO program for the
+                 cube
+src/gammacmd.c   alpha gamma: the soup, the check against plain C, the run with a census
 src/super.c      the superoptimizer: shortest programs for a specification, with the proof
 src/supercmd.c   alpha super, and the library's building blocks as specifications
 src/platform.c   timer, CPU topology, pinning, priority, threads (Windows and Linux)

@@ -234,15 +234,19 @@ things, each finishing at its own time, and every one is checked against an emul
 
 ## 9. A world: gamma
 
-Gamma is a 3-D world of voxels, one per machine, with light falling from a sun plane and minerals
-diffusing up from the floor ([docs/GAMMA.md](GAMMA.md)). The laws are one NAND/STO program:
+Gamma is a 3-D world of voxels, one per machine, with light falling from a sun plane, minerals
+diffusing up from the floor, and cells living in it ([docs/GAMMA.md](GAMMA.md)). Every cell is a
+circuit of 32 NAND gates; dividing is part of the physics, and the world starts as a soup of random
+genomes. All of it is one NAND/STO program:
 
 ```
 bin/alpha gamma --show
-bin/alpha gamma --occupied 20 --show
+bin/alpha gamma --soup 30 --ticks 100000 --every 10000
 ```
 
-`--occupied` puts things into the world; watch the shade under them in the light slice.
+The first 100 ticks are checked against plain C, voxel by voxel; then the world runs on all cores
+with a census every so often: cells, distinct genomes, how many ask to divide. `--show` ends with a
+slice through the world, letters for the most common genomes.
 
 ## 10. The superoptimizer
 
@@ -282,7 +286,9 @@ Ideas, from a few minutes to a weekend:
   automaton on a ring of 512 machines; try other rules.
 - **512 different beta programs.** Give every beta a different number with `--lane-input` and print
   something that depends on it: primes below N, a countdown, a pattern.
-- **Change the world.** In gamma, how far down does the light reach through 20 % occupied voxels?
+- **Change the world.** In gamma, make asking to divide cost energy: change `gamma_step()` and
+  `gen_gamma()` the same way (`test_gamma` tells you when they disagree) and see whether the cells
+  learn to use their senses.
 - **Measure your CPU.** `bin/alpha scale examples/adder8.asm` and `bin/alpha sweep
   examples/adder8.asm` show how your cores and caches compare; E-cores, hyper-threads and RAM all
   show up.
