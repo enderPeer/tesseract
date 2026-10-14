@@ -1,0 +1,76 @@
+; The primes below N, where N comes in through IN after the program starts. With
+; --lane-input every one of the 512 betas gets its own N, its lane number, and they all finish
+; at different times: each lane has its own program counter.
+;   alpha beta run examples\beta\primes.bs --byte 100
+;   alpha beta run examples\beta\primes.bs --lane-input --show 97
+        .org 0
+        IN              ; N
+        STA lim
+        LDA #2
+        STA n
+next:   LDA n
+        SUB lim
+        JC  done        ; n >= N
+        LDA #2
+        STA d
+try:    LDA d
+        SUB n
+        JC  prime       ; d reached n: no divisor
+        LDA n           ; n mod d, by subtracting
+mod:    SUB d
+        JC  mod
+        ADD d           ; one subtraction too many
+        JZ  notp        ; d divides n
+        LDA d
+        ADD #1
+        STA d
+        JMP try
+prime:  LDA n
+        JSR prdec
+        LDA #' '
+        OUT
+notp:   LDA n
+        ADD #1
+        STA n
+        JMP next
+done:   LDA #'\n'
+        OUT
+        JMP MON
+
+; prdec: print A (0 .. 255) in decimal, without leading zeros
+prdec:  .byte 0, 0
+        STA num
+        LDX #100
+        JSR digit
+        LDX #10
+        JSR digit
+        LDA num
+        ADD #'0'
+        OUT
+        LDA #0
+        STA lead
+        JMP (prdec)
+digit:  .byte 0, 0
+        STX div
+        LDX #'0'
+dloop:  LDA num
+        SUB div
+        JC  dfit
+        TXA
+        SUB #'0'
+        OR  lead
+        JZ  dret
+        TXA
+        OUT
+        STA lead
+dret:   JMP (digit)
+dfit:   STA num
+        INX
+        JMP dloop
+
+lim:    .byte 0
+n:      .byte 0
+d:      .byte 0
+num:    .byte 0
+div:    .byte 0
+lead:   .byte 0

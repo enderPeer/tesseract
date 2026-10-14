@@ -1,0 +1,18 @@
+# build output
+bin/
+build/
+*.obj
+*.o
+*.exe
+*.pdb
+*.ilk
+
+# files you make while following the tutorial
+/mul12.asm
+/maj.asm
+/stars.bs
+
+# private: the author's LAN (machines, addresses) and cluster settings
+docs/CLUSTER.md
+tools/cluster.local.sh
+/h.asm

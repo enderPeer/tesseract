@@ -1,0 +1,9 @@
+; Hello from beta, the byte computer built from NAND/STO (docs/BETA.md). The monitor loads this
+; at 0x00 and starts it there; it prints with the monitor's PUTS service and goes back.
+;   alpha beta run examples\beta\hello.bs
+        .org 0
+        LDX #msg        ; PUTS prints the zero-terminated string at X
+        LDA #back       ; and comes back to the address in A
+        JMP PUTS
+back:   JMP MON         ; done: back to the monitor
+msg:    .asciz "HELLO FROM BETA\n"

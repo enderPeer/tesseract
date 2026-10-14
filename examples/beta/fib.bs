@@ -1,0 +1,69 @@
+; The Fibonacci numbers that fit in a byte, in decimal. Shows loops, the carry flag and a
+; subroutine (JSR stores the return address in the routine's first byte, JMP (prdec) returns).
+;   alpha beta run examples\beta\fib.bs
+        .org 0
+        LDA #0
+        STA f0
+        LDA #1
+        STA f1
+        STA more        ; f1 is still a Fibonacci number below 256
+loop:   LDA f0
+        JSR prdec
+        LDA more
+        JZ  done
+        LDA #' '
+        OUT
+        LDA f0
+        ADD f1          ; the next one; C = 1 when it does not fit
+        STA t
+        LDA f1
+        STA f0
+        LDA t
+        STA f1
+        JC  last
+        JMP loop
+last:   LDA #0          ; print f0 once more, then stop
+        STA more
+        JMP loop
+done:   LDA #'\n'
+        OUT
+        JMP MON
+
+; prdec: print A (0 .. 255) in decimal, without leading zeros
+prdec:  .byte 0, 0
+        STA num
+        LDX #100
+        JSR digit
+        LDX #10
+        JSR digit
+        LDA num         ; the last digit, always printed
+        ADD #'0'
+        OUT
+        LDA #0
+        STA lead
+        JMP (prdec)
+digit:  .byte 0, 0      ; one digit of num, for the power of ten in X
+        STX div
+        LDX #'0'
+dloop:  LDA num
+        SUB div
+        JC  dfit        ; C = 1: no borrow, num >= div
+        TXA
+        SUB #'0'
+        OR  lead        ; a 0 is printed only after another digit
+        JZ  dret
+        TXA
+        OUT
+        STA lead
+dret:   JMP (digit)
+dfit:   STA num
+        INX
+        JMP dloop
+
+f0:     .byte 0
+f1:     .byte 0
+t:      .byte 0
+more:   .byte 0
+num:    .byte 0
+div:    .byte 0
+lead:   .byte 0
