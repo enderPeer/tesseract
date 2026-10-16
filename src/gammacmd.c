@@ -1,6 +1,7 @@
 /* alpha gamma (step 11): the world of docs/GAMMA.md on the cube. The fields settle, a soup of cells
    with random genomes goes in, the compiled cube is checked against plain C after every one of the
-   first ticks, and then runs on all threads, with a census every so often. */
+   first ticks, and then runs on all threads, with a census every so often, and under each census
+   the ledger of 16 ticks of plain C from there. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,7 +73,8 @@ static void usage(void)
           "                 65536 in all; one number for a cube), default 32\n"
           "  --soup P       percent of voxels that start with a cell, random genome (default 10)\n"
           "  --energy E     the energy each of them starts with (default 64)\n"
-          "  --settle N     ticks of the empty world first, for light and minerals (default 2000)\n"
+          "  --settle N     ticks of the empty world first, with the sun cycling, for light and\n"
+          "                 minerals (default 2000)\n"
           "  --check C      ticks checked against plain C, every voxel (default 100)\n"
           "  --ticks T      ticks in all (default 10000), a census every K (default T/10)\n"
           "  --seconds S    or stop at the first census after S seconds of running\n"
@@ -130,12 +132,17 @@ static size_t kinds_of(const GammaWorld *w, Kind **kinds)
     return k;
 }
 
+enum { LEDGER_TICKS = 16 };  /* ticks of plain C under each census line */
+
 static void census_head(unsigned Z)
 {
-    printf("\n%9s %7s %8s %8s %6s %7s %6s %6s %6s %7s %7s %7s  cells by depth: z 0-%u | %u-%u | "
-           "%u-%u | %u-%u\n", "tick", "cells", "dividing", "genomes", "top", "energy", "ask", "got",
-           "give", "flow", "bodies", "largest", Z / 4 - 1, Z / 4, Z / 2 - 1, Z / 2, 3 * Z / 4 - 1,
-           3 * Z / 4, Z - 1);
+    printf("\n%9s %7s %6s %7s %6s %7s %6s %6s %6s %7s %6s %7s %4s %7s %7s cells by depth: z 0-%u "
+           "| %u-%u | %u-%u | %u-%u\n", "tick", "cells", "busy", "genomes", "top", "energy",
+           "ask", "got", "give", "flow", "kin", "hoard", "day", "bodies", "largest", Z / 4 - 1,
+           Z / 4, Z / 2 - 1, Z / 2, 3 * Z / 4 - 1, 3 * Z / 4, Z - 1);
+    printf("%9s %8s %8s %7s %7s %7s %7s %6s %7s | deaths %5s %7s %7s | grants %5s %5s %5s "
+           "%5s %5s %5s\n", "per tick", "light", "minerals", "cap", "upkeep", "rot", "death",
+           "split", "given", "term", "starved", "aborted", "+x", "-x", "+y", "-y", "down", "up");
 }
 
 /* The bodies: connected groups of 2 or more cells with the same genome (face neighbours, the
@@ -182,13 +189,17 @@ static size_t bodies(const GammaWorld *w, size_t *largest, size_t *in_bodies)
 
 /* ask: of the cells that were free at the start of the tick, how many asked to divide; got: of
    those, how many were granted a voxel (they are busy now, with the counter at 0); give: of the
-   free cells, how many gave energy away; flow: the energy given, per tick. */
+   free cells, how many gave energy away; flow: the energy given, per tick; kin: of it, the share
+   offered to a cell that holds the giver's genome, unrotated, at the end of the tick (the one in
+   its direction, gates 29-31, which a living giver still holds; a dividing receiver or one that
+   died this tick does not count: a lower bound); hoard: what midnight would take now, the energy
+   above 127 summed; day: the clock. */
 static void census(const GammaWorld *w, unsigned long long tick)
 {
     unsigned Z = 1u << w->zbits;
     size_t cells = 0, dividing = 0, band[4] = {0, 0, 0, 0}, free_ = 0, ask = 0, got = 0, give = 0;
-    size_t nbodies, largest, in_bodies;
-    double energy = 0, flow = 0;
+    size_t nbodies, largest, in_bodies, hoard = 0;
+    double energy = 0, flow = 0, kin = 0;
     for (size_t v = 0; v < w->n; v++) {
         if (!w->alive[v])
             continue;
@@ -198,6 +209,14 @@ static void census(const GammaWorld *w, unsigned long long tick)
         energy += w->energy[v];
         band[z * 4 / Z]++;
         flow += w->offer[v];
+        if (w->energy[v] > GAMMA_OMER)
+            hoard += w->energy[v] - GAMMA_OMER;
+        if (w->offer[v]) {
+            size_t to = gamma_neighbour(w, v, (int)(w->gates[v] >> (GAMMA_DIVIDE + 1) & 7));
+            if (w->alive[to] && genome_hash(w->genome + GAMMA_GATES * to) ==
+                                    genome_hash(w->genome + GAMMA_GATES * v))
+                kin += w->offer[v];
+        }
         if (w->busy[v] && (w->embryo[v] || w->counter[v] > 0))  /* was busy before the tick */
             continue;
         free_++;
@@ -212,15 +231,42 @@ static void census(const GammaWorld *w, unsigned long long tick)
     for (size_t i = 0; i < nk; i++)
         settled += k[i].count;
     nbodies = bodies(w, &largest, &in_bodies);
-    printf("%9llu %7zu %8zu %8zu %5.1f%% %7.1f %5.1f%% %5.1f%% %5.1f%% %7.0f %7zu %7zu  %7zu | "
-           "%5zu | %5zu | %5zu\n", tick, cells, dividing, nk,
+    printf("%9llu %7zu %6zu %7zu %5.1f%% %7.1f %5.1f%% %5.1f%% %5.1f%% %7.0f %5.1f%% %7zu %4u "
+           "%7zu %7zu %7zu | %5zu | %5zu | %5zu\n", tick, cells, dividing, nk,
            settled ? 100.0 * (double)k[0].count / (double)settled : 0.0,
            cells ? energy / (double)cells : 0.0, free_ ? 100.0 * (double)ask / (double)free_ : 0.0,
            ask ? 100.0 * (double)got / (double)ask : 0.0,
-           free_ ? 100.0 * (double)give / (double)free_ : 0.0, flow, nbodies, largest, band[0],
-           band[1], band[2], band[3]);
+           free_ ? 100.0 * (double)give / (double)free_ : 0.0, flow,
+           flow > 0 ? 100.0 * kin / flow : 0.0, hoard, (unsigned)w->clock[0], nbodies, largest,
+           band[0], band[1], band[2], band[3]);
     fflush(stdout);
     free(k);
+}
+
+/* The ledger: a copy of the world runs LEDGER_TICKS ticks of plain C (in `scratch`, made with
+   gamma_world_init once), the ledgers summed and printed per tick, and whether every one of the
+   single ticks closes (the two identities of gamma.h). The cube is not touched. */
+static void ledger_line(const GammaWorld *w, GammaWorld *scratch)
+{
+    GammaLedger sum = {0};
+    int closes = 1;
+    gamma_world_copy(scratch, w);
+    for (int i = 0; i < LEDGER_TICKS; i++) {
+        gamma_step(scratch);
+        gamma_ledger_add(&sum, &scratch->ledger);
+        closes &= gamma_ledger_closes(&scratch->ledger);
+    }
+    const double per = 1.0 / LEDGER_TICKS;
+    printf("%9s %8.1f %8.1f %7.1f %7.1f %7.1f %7.1f %6.1f %7.1f | deaths %5.1f %7.1f %7.1f | grants "
+           "%5.1f %5.1f %5.1f %5.1f %5.1f %5.1f | %s\n", "16 ticks", (double)sum.light * per,
+           (double)sum.minerals * per, (double)sum.cap * per, (double)sum.upkeep * per,
+           (double)sum.rot * per, (double)sum.death * per, (double)sum.split * per,
+           (double)sum.given * per, (double)sum.term * per, (double)sum.starved * per,
+           (double)sum.aborted * per, (double)sum.grants_by_dir[0] * per,
+           (double)sum.grants_by_dir[1] * per, (double)sum.grants_by_dir[2] * per,
+           (double)sum.grants_by_dir[3] * per, (double)sum.grants_by_dir[4] * per,
+           (double)sum.grants_by_dir[5] * per, closes ? "closes" : "DOES NOT CLOSE");
+    fflush(stdout);
 }
 
 /* the plane y = Y/2: '.' empty, '+' being born, 'A' .. 'Z' the most common genomes, 'o' others */
@@ -430,7 +476,7 @@ int cmd_gamma(int argc, char **argv)
     GammaCells cells;
     JitCode jc;
     LaneCube lc;
-    GammaWorld want, got;
+    GammaWorld want, got, scratch;  /* scratch: for the ledger under each census */
     char err[256];
     gen_gamma(&p, bits[0], bits[1], bits[2], &cells);
     if (!jit_compile(&p, 0, &jc, NULL, err, sizeof err)) {
@@ -438,7 +484,8 @@ int cmd_gamma(int argc, char **argv)
         return 1;
     }
     if (!lane_cube_init(&lc, &p) || !gamma_world_init(&want, bits[0], bits[1], bits[2]) ||
-        !gamma_world_init(&got, bits[0], bits[1], bits[2])) {
+        !gamma_world_init(&got, bits[0], bits[1], bits[2]) ||
+        !gamma_world_init(&scratch, bits[0], bits[1], bits[2])) {
         fputs("out of memory\n", stderr);
         return 1;
     }
@@ -456,15 +503,18 @@ int cmd_gamma(int argc, char **argv)
     if (!k || lc.groups == 1)  /* 512 machines run on one thread */
         k = 1;
 
-    /* the empty world first, until light and minerals have settled */
-    lane_cube_reset(&lc);
+    /* the empty world first, until light and minerals have settled; its clock set so that it reads
+       sunrise when the soup goes in, and the column of light below matches */
+    memset(want.clock, (int)((GAMMA_SUNRISE - settle) & 255), want.n);
+    gamma_to_cube(&lc, &cells, &want);
     if (settle)
         par_cube_run(&jc, &lc, k, ids, idle, settle, NULL);
     gamma_from_cube(&lc, &cells, &want);
     size_t seeded = gamma_soup(&want, soup / 100, energy, seed);
     gamma_to_cube(&lc, &cells, &want);
     printf("the fields settled for %llu ticks; %zu cells went in with random genomes (%.1f %%), "
-           "energy %u each\n", settle, seeded, 100.0 * (double)seeded / (double)want.n, energy);
+           "energy %u each,\nat sunrise: the clock at %d of a %d-tick day\n", settle, seeded,
+           100.0 * (double)seeded / (double)want.n, energy, GAMMA_SUNRISE, 1 << GAMMA_CLOCK_BITS);
 
     /* every voxel against plain C, tick by tick */
     long bad = -1;
@@ -492,6 +542,7 @@ int cmd_gamma(int argc, char **argv)
         census_head(Z);
         gamma_from_cube(&lc, &cells, &got);
         census(&got, t);
+        ledger_line(&got, &scratch);
         while (t < ticks && !(seconds > 0 && busy_s >= seconds)) {
             unsigned long long n = every - t % every;
             if (n > ticks - t)
@@ -501,6 +552,7 @@ int cmd_gamma(int argc, char **argv)
             t += n;
             gamma_from_cube(&lc, &cells, &got);
             census(&got, t);
+            ledger_line(&got, &scratch);
         }
         if (show)
             print_slice(&got);
@@ -515,6 +567,7 @@ int cmd_gamma(int argc, char **argv)
     free(ids);
     gamma_world_free(&want);
     gamma_world_free(&got);
+    gamma_world_free(&scratch);
     lane_cube_free(&lc);
     jit_free(&jc);
     program_free(&p);

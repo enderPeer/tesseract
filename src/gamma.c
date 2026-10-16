@@ -8,8 +8,8 @@
 #include "gen.h"
 
 const char *const gamma_part_names[GAMMA_PARTS] = {
-    "where am I", "dice", "neighbour reads", "gates (the brain)", "asking and offering", "grants",
-    "partner reads", "energy and state", "genome copy", "light", "minerals", "registers"};
+    "where am I", "clock", "dice", "neighbour reads", "gates (the brain)", "asking and offering",
+    "grants", "partner reads", "energy and state", "genome copy", "light", "minerals", "registers"};
 
 /* ---- the world in plain C ----------------------------------------------------------------- */
 
@@ -25,14 +25,16 @@ static int arrays(GammaWorld *w)
     w->request = calloc(n, 1);
     w->offer = calloc(n, 1);
     w->born = calloc(n, 1);
+    w->clock = calloc(n, 1);
+    w->term = calloc(n, sizeof *w->term);
     w->genome = calloc(n * GAMMA_GATES, sizeof *w->genome);
     w->gates = calloc(n, sizeof *w->gates);
     w->rng = calloc(n, sizeof *w->rng);
     w->light = calloc(n, 1);
     w->mineral = calloc(n, sizeof *w->mineral);
     return w->alive && w->busy && w->embryo && w->partner && w->counter && w->energy &&
-           w->request && w->offer && w->born && w->genome && w->gates && w->rng && w->light &&
-           w->mineral;
+           w->request && w->offer && w->born && w->clock && w->term && w->genome && w->gates &&
+           w->rng && w->light && w->mineral;
 }
 
 static void free_arrays(GammaWorld *w)
@@ -46,6 +48,8 @@ static void free_arrays(GammaWorld *w)
     free(w->request);
     free(w->offer);
     free(w->born);
+    free(w->clock);
+    free(w->term);
     free(w->genome);
     free(w->gates);
     free(w->rng);
@@ -85,6 +89,27 @@ void gamma_world_free(GammaWorld *w)
     memset(w, 0, sizeof *w);
 }
 
+void gamma_world_copy(GammaWorld *dst, const GammaWorld *src)
+{
+    size_t n = src->n;
+    memcpy(dst->alive, src->alive, n);
+    memcpy(dst->busy, src->busy, n);
+    memcpy(dst->embryo, src->embryo, n);
+    memcpy(dst->partner, src->partner, n);
+    memcpy(dst->counter, src->counter, n);
+    memcpy(dst->energy, src->energy, n);
+    memcpy(dst->request, src->request, n);
+    memcpy(dst->offer, src->offer, n);
+    memcpy(dst->born, src->born, n);
+    memcpy(dst->clock, src->clock, n);
+    memcpy(dst->term, src->term, n * sizeof *dst->term);
+    memcpy(dst->genome, src->genome, n * GAMMA_GATES * sizeof *dst->genome);
+    memcpy(dst->gates, src->gates, n * sizeof *dst->gates);
+    memcpy(dst->rng, src->rng, n * sizeof *dst->rng);
+    memcpy(dst->light, src->light, n);
+    memcpy(dst->mineral, src->mineral, n * sizeof *dst->mineral);
+}
+
 static void swap_state(GammaWorld *a, GammaWorld *b)
 {
 #define SWAP(f)          \
@@ -102,6 +127,8 @@ static void swap_state(GammaWorld *a, GammaWorld *b)
     SWAP(request);
     SWAP(offer);
     SWAP(born);
+    SWAP(clock);
+    SWAP(term);
     SWAP(genome);
     SWAP(gates);
     SWAP(rng);
@@ -144,18 +171,27 @@ static unsigned dir_of(uint32_t gates)  /* the direction a cell's gates ask to d
     return gates >> (GAMMA_DIVIDE + 1) & 7;
 }
 
+unsigned gamma_sun(unsigned clock)  /* a triangle wave over the day: 0, 2, .. 254, .. 2, 0 */
+{
+    clock &= (1u << GAMMA_CLOCK_BITS) - 1;
+    return 2 * (clock < 128 ? clock : 255 - clock);
+}
+
 void gamma_step(GammaWorld *w)
 {
     GammaWorld *o = w->spare;
+    GammaLedger *L = &w->ledger;
     unsigned Z = 1u << w->zbits, zshift = (unsigned)(w->xbits + w->ybits);
     const uint16_t *m = w->mineral;
+    memset(L, 0, sizeof *L);
 
-    /* 1. The dice, the senses and the gates of every cell, and what it asks and offers this tick
-       (into the next state, for the other voxels to read in passes 2 and 3). */
+    /* 1. The clock, then the dice, the senses and the gates of every cell, and what it asks and
+       offers this tick (into the next state, for the other voxels to read in passes 2 and 3). */
     for (size_t v = 0; v < w->n; v++) {
         unsigned E = w->energy[v], active = w->alive[v] & !w->busy[v];
         uint32_t r = xorshift32(w->rng[v]), s = 1u | (r & 7u) << 1, g = w->gates[v];
         size_t nb[6];
+        o->clock[v] = (uint8_t)(w->clock[v] + 1);
         for (int d = 0; d < 6; d++) {
             nb[d] = gamma_neighbour(w, v, d);
             s |= (uint32_t)w->alive[nb[d]] << (4 + d);
@@ -183,15 +219,18 @@ void gamma_step(GammaWorld *w)
         o->offer[v] = (uint8_t)(active & dirok & (g >> GAMMA_GIVE & 1) && w->alive[nb[D]] ? E >> 3 : 0);
     }
 
-    /* 2. The grants: an empty voxel takes the cell asking for it from the lowest direction. */
+    /* 2. The grants: an empty voxel takes, of the cells asking for it, the one in the direction d
+       with the smallest d XOR k, k being 3 bits of its own dice this tick (the lot). */
     for (size_t v = 0; v < w->n; v++) {
-        unsigned hits = 0;
+        unsigned hits = 0, k = o->rng[v] >> GAMMA_LOT_DICE & 7, win = 0;
         for (int d = 0; d < 6; d++) {
             size_t u = gamma_neighbour(w, v, d);
             if (o->request[u] && dir_of(o->gates[u]) == (unsigned)(d ^ 1))
                 hits |= 1u << d;
         }
-        w->grant[v] = (uint8_t)(w->alive[v] ? 0 : hits & (0u - hits));
+        for (unsigned j = 0; j < 8 && !win; j++)  /* j = d ^ k, the smallest first */
+            win = hits & (1u << (j ^ k));
+        w->grant[v] = (uint8_t)(w->alive[v] ? 0 : win);
     }
 
     /* 3. Energy, life and death, the genome, the fields. */
@@ -201,6 +240,7 @@ void gamma_step(GammaWorld *w)
             nb[d] = gamma_neighbour(w, v, d);
         unsigned z = (unsigned)(v >> zshift), E = w->energy[v], A = w->alive[v], B = w->busy[v];
         unsigned active = A & !B, busy = A & B, emb = busy & w->embryo[v];
+        unsigned clock = o->clock[v], midnight = clock == 0;
         uint32_t r = o->rng[v], g = o->gates[v];
 
         /* division: did this cell's request go through, did this voxel grant one */
@@ -229,23 +269,64 @@ void gamma_step(GammaWorld *w)
                 recv += o->offer[nb[d]];
 
         /* energy: gains, upkeep, the split and the gift (never below 0: the gift is an eighth of
-           what the cell had, the split half, and nothing is taken before upkeep is paid), death */
+           what the cell had, the split half, and nothing is taken before upkeep is paid), death
+           by starving, by the term being up, or with the parent; at midnight the manna: a cell
+           keeps at most 127 of what it ends the tick with */
         unsigned gain = (w->light[v] >> 5) + (m[v] >> 9u) + recv;
         unsigned e1 = E + gain > GAMMA_ENERGY_MAX ? GAMMA_ENERGY_MAX : E + gain;
         unsigned starve = e1 == 0, e2 = starve ? 0 : e1 - 1;
         unsigned parent = active & granted, e3 = (parent ? e2 - (E >> 1) : e2) - o->offer[v];
-        unsigned death = (r >> 3 & ((1u << GAMMA_DEATH_BITS) - 1)) == (1u << GAMMA_DEATH_BITS) - 1;
+        unsigned termup = w->term[v] == 0;
         unsigned abort = emb & !(pA & pB & !pK);
-        unsigned die = (A & (starve | death)) | abort, live = A & !die;
+        unsigned die = (A & (starve | termup)) | abort, live = A & !die;
         unsigned finish = busy & (w->counter[v] == GAMMA_GATES - 1);
+        unsigned en = newborn ? pE >> 1 : live ? e3 : 0;
+        unsigned rot = midnight && en > GAMMA_OMER ? en - GAMMA_OMER : 0;
+        unsigned term = GAMMA_TERM_MIN + (r >> GAMMA_TERM_DICE & (GAMMA_TERM_MIN - 1u));
 
         o->alive[v] = (uint8_t)(live | newborn);
         o->busy[v] = (uint8_t)((((busy & !finish) | parent) & !die) | newborn);
         o->embryo[v] = (uint8_t)((emb & !finish & !die) | newborn);
         o->partner[v] = (uint8_t)(newborn ? gdir : parent ? D : w->partner[v]);
         o->counter[v] = (uint8_t)(busy ? (w->counter[v] + 1) & (GAMMA_GATES - 1) : 0);
-        o->energy[v] = (uint8_t)(newborn ? pE >> 1 : live ? e3 : 0);
+        o->energy[v] = (uint8_t)(en - rot);
         o->born[v] = (uint8_t)(emb & finish & !die);
+        o->term[v] = (uint16_t)(newborn ? term : live ? w->term[v] - 1u : 0);
+
+        /* the ledger. A cell's new energy is E + gain - cap - upkeep - split - gift - rot, or 0
+           with death = what it would have kept, so summed over the world
+               energy after - energy before = light + minerals - cap - upkeep - rot - death
+           by construction: the splits come back as the new cells' energy and the gifts as what
+           the receivers got (received = given, a gift goes only to a cell that is there). And
+               cells after - cells before = granted - term - starved - aborted
+           since a cell at the end is one from the start that did not die, or a new one. */
+        if (A) {
+            L->cells_before++;
+            L->energy_before += E;
+            L->light += w->light[v] >> 5;
+            L->minerals += m[v] >> 9u;
+            L->received += recv;
+            L->cap += E + gain - e1;
+            L->upkeep += !starve;
+            L->given += o->offer[v];
+            L->split += parent ? E >> 1 : 0;
+            if (die) {
+                L->death += e3;
+                if (termup)
+                    L->term++;
+                else if (starve)
+                    L->starved++;
+                else
+                    L->aborted++;
+            }
+        }
+        if (newborn) {
+            L->granted++;
+            L->grants_by_dir[gdir]++;
+        }
+        L->rot += rot;
+        L->cells_after += o->alive[v];
+        L->energy_after += o->energy[v];
 
         /* the genome: while dividing it moves up one gate, the parent's first gate going to its
            end, the parent's first gate (maybe mutated) to the end of the new cell's */
@@ -267,7 +348,7 @@ void gamma_step(GammaWorld *w)
         /* the fields */
         size_t up = nb[5];
         unsigned l = w->light[up];
-        o->light[v] = (uint8_t)(z == 0 ? GAMMA_LIGHT_MAX : w->alive[up] ? l / 2 : l - l / 8);
+        o->light[v] = (uint8_t)(z == 0 ? gamma_sun(clock) : w->alive[up] ? l / 2 : l - l / 8);
         unsigned sum = 2u * m[v] + m[nb[0]] + m[nb[1]] + m[nb[2]] + m[nb[3]] + m[nb[4]] + m[nb[5]];
         unsigned eat = A ? (m[v] >> 9u) << 6 : 0;  /* never more than sum / 8 */
         unsigned val = sum / 8 - eat + (die ? GAMMA_RELEASE : 0);
@@ -305,15 +386,55 @@ size_t gamma_soup(GammaWorld *w, double fraction, unsigned energy, uint64_t seed
         w->rng[v] = r;
         w->alive[v] = (uint8_t)cell;
         w->busy[v] = w->embryo[v] = w->partner[v] = w->counter[v] = 0;
-        w->request[v] = w->born[v] = 0;
+        w->request[v] = w->offer[v] = w->born[v] = 0;
         w->gates[v] = 0;
         w->energy[v] = (uint8_t)(cell ? energy : 0);
+        w->clock[v] = GAMMA_SUNRISE;
         for (int i = 0; i < GAMMA_GATES; i++)
             w->genome[GAMMA_GATES * v + i] =
                 (uint16_t)(cell ? splitmix64(&s) & ((1u << GAMMA_GATE_BITS) - 1) : 0);
         made += (size_t)cell;
     }
+    for (size_t v = 0; v < w->n; v++)  /* the terms after all the genomes: the 11c soup, aged */
+        w->term[v] =
+            (uint16_t)(w->alive[v] ? 1 + splitmix64(&s) % ((1u << GAMMA_TERM_BITS) - 1) : 0);
     return made;
+}
+
+void gamma_ledger_add(GammaLedger *sum, const GammaLedger *l)
+{
+#define ADD(f) (sum->f += l->f)
+    ADD(cells_before);
+    ADD(cells_after);
+    ADD(energy_before);
+    ADD(energy_after);
+    ADD(light);
+    ADD(minerals);
+    ADD(received);
+    ADD(given);
+    ADD(cap);
+    ADD(upkeep);
+    ADD(rot);
+    ADD(death);
+    ADD(split);
+    ADD(granted);
+    ADD(term);
+    ADD(starved);
+    ADD(aborted);
+    for (int d = 0; d < 6; d++)
+        ADD(grants_by_dir[d]);
+#undef ADD
+}
+
+int gamma_ledger_closes(const GammaLedger *l)  /* each identity with its sums on either side */
+{
+    uint64_t by_dir = 0;
+    for (int d = 0; d < 6; d++)
+        by_dir += l->grants_by_dir[d];
+    return l->energy_after + l->cap + l->upkeep + l->rot + l->death ==
+               l->energy_before + l->light + l->minerals &&
+           l->cells_after + l->term + l->starved + l->aborted == l->cells_before + l->granted &&
+           l->received == l->given && by_dir == l->granted;
 }
 
 long gamma_compare(const GammaWorld *a, const GammaWorld *b, const char **what)
@@ -328,6 +449,8 @@ long gamma_compare(const GammaWorld *a, const GammaWorld *b, const char **what)
                         : a->request[v] != b->request[v] ? "request"
                         : a->offer[v] != b->offer[v]     ? "offer"
                         : a->born[v] != b->born[v]       ? "born"
+                        : a->clock[v] != b->clock[v]     ? "clock"
+                        : a->term[v] != b->term[v]       ? "term"
                         : a->gates[v] != b->gates[v]     ? "gates"
                         : a->rng[v] != b->rng[v]         ? "random generator"
                         : a->light[v] != b->light[v]     ? "light"
@@ -517,6 +640,10 @@ int gen_gamma(Program *p, int xbits, int ybits, int zbits, GammaCells *c)
         c->energy[i] = cellf(b, "E%d", i);
     for (int j = 0; j < GAMMA_OFFER_BITS; j++)
         c->offer[j] = cellf(b, "of%d", j);
+    for (int i = 0; i < GAMMA_CLOCK_BITS; i++)
+        c->clock[i] = cellf(b, "ck%d", i);
+    for (int i = 0; i < GAMMA_TERM_BITS; i++)
+        c->term[i] = cellf(b, "tm%d", i);
     for (int i = 0; i < GAMMA_GATES; i++)
         for (int j = 0; j < GAMMA_GATE_BITS; j++) {
             snprintf(name, sizeof name, "G%d_%d", i, j);
@@ -531,7 +658,7 @@ int gen_gamma(Program *p, int xbits, int ybits, int zbits, GammaCells *c)
     for (int i = 0; i < GAMMA_MINERAL_BITS; i++)
         c->mineral[i] = cellf(b, "M%d", i);
     uint32_t *x = c->rng, *gt = c->gates, *E = c->energy, *L = c->light, *M = c->mineral;
-    uint32_t one = CELL_ONE, zero = CELL_ZERO;
+    uint32_t *ck = c->clock, *tm = c->term, one = CELL_ONE, zero = CELL_ZERO;
 
     /* where this machine is: which link leads to each neighbour, the sun plane, the floor */
     static const char *tag[3] = {"gx", "gy", "gz"};
@@ -548,6 +675,15 @@ int gen_gamma(Program *p, int xbits, int ybits, int zbits, GammaCells *c)
         b_gate2(b, G_AND, floor, floor, idz[zbits - 1]);
     }
     PART(GAMMA_PART_WHERE);
+
+    /* the clock: + 1 in place before anything else, the same in every voxel; a day is 256 ticks.
+       The carry out of the top bit is the wrap to 0: midnight, for the manna below. */
+    uint32_t ck_d = b_cell(b, "ck_d");
+    uint32_t ck_c[2] = {gate(b, G_BUF, "ck_c", &one, 1), ck_d};
+    for (int i = 0; i < GAMMA_CLOCK_BITS; i++)
+        b_half_adder(b, ck[i], ck_c[(i + 1) & 1], ck[i], ck_c[i & 1]);
+    uint32_t midnight = ck_c[GAMMA_CLOCK_BITS & 1];
+    PART(GAMMA_PART_CLOCK);
 
     /* the dice: xorshift32 in place, the new state is this tick's random bits */
     for (int i = 31; i >= 13; i--)
@@ -638,10 +774,10 @@ int gen_gamma(Program *p, int xbits, int ybits, int zbits, GammaCells *c)
 
     /* grants. The neighbours' asks, directions and offers, this tick's, one link each; point[d]:
        the neighbour in direction d points at this voxel (towards d ^ 1); an empty voxel grants
-       the first neighbour pointing at it and asking. Then each cell reads whether the voxel it
-       asked for granted it: that voxel's grant from the opposite direction. */
+       one of the neighbours pointing at it and asking (the hits), by lot. Then each cell reads
+       whether the voxel it asked for granted it: that voxel's grant from the opposite direction. */
     uint32_t nalive = not1(b, "nalive", c->alive), req[6], dir[6][3], off[6][GAMMA_OFFER_BITS];
-    uint32_t point[6], hit[6], grant[6], gin[6], free_ = b_cell(b, "free");
+    uint32_t point[6], hit[6], grant[6], gin[6];
     for (int d = 0; d < 6; d++) {
         snprintf(name, sizeof name, "rq%d", d);
         req[d] = from_dir(&g, name, c->request, d);
@@ -654,7 +790,6 @@ int gen_gamma(Program *p, int xbits, int ybits, int zbits, GammaCells *c)
             off[d][j] = from_dir(&g, name, c->offer[j], d);
         }
     }
-    b_gate(b, G_BUF, free_, &nalive, 1);  /* empty, and nothing granted yet */
     for (int d = 0; d < 6; d++) {
         uint32_t in[3];
         for (int j = 0; j < 3; j++) {
@@ -665,10 +800,45 @@ int gen_gamma(Program *p, int xbits, int ybits, int zbits, GammaCells *c)
         point[d] = gate(b, G_AND, name, in, 3);
         snprintf(name, sizeof name, "hit%d", d);
         hit[d] = gate2(b, G_AND, name, req[d], point[d]);
+    }
+    /* the lot: of the hits, the direction d with the smallest d XOR k wins, k being 3 of the
+       voxel's dice bits. Bit by bit from the top, the winner agrees with k in bit j unless no hit
+       left does. So d wins when at every bit j it agrees with k there, or no hit agrees with d
+       above bit j and differs in bit j (d's sibling group there). hits[j][q]: a hit among the
+       directions whose bits above j are q (a tree of ORs; a group of one is the hit itself);
+       ok[j][q]: those directions pass bit j; the group of 6 and 7 never hits and passes nothing.
+       151 instructions, against about 1,100 for a one-hot of k, the hits permuted by k, a scan
+       and the permutation back. */
+    static const int groups[3] = {6, 3, 2};  /* at level j: the directions d >> j */
+    const uint32_t *lot = &x[GAMMA_LOT_DICE];
+    uint32_t nlot[3], hits[3][6] = {{0}}, ok[3][6] = {{0}};
+    for (int j = 0; j < 3; j++) {
+        snprintf(name, sizeof name, "nlot%d", j);
+        nlot[j] = not1(b, name, lot[j]);
+    }
+    for (int d = 0; d < 6; d++)
+        hits[0][d] = hit[d];
+    for (int j = 1; j < 3; j++)
+        for (int q = 0; q < groups[j]; q++) {
+            snprintf(name, sizeof name, "hits%d_%d", j, q);
+            hits[j][q] = 2 * q + 1 < groups[j - 1]
+                             ? gate2(b, G_OR, name, hits[j - 1][2 * q], hits[j - 1][2 * q + 1])
+                             : hits[j - 1][2 * q];
+        }
+    for (int j = 0; j < 3; j++)
+        for (int q = 0; q < groups[j]; q++)
+            if ((q ^ 1) < groups[j]) {  /* bit j of q agrees with k, or the sibling has no hit */
+                snprintf(name, sizeof name, "ok%d_%d", j, q);
+                ok[j][q] = gate2(b, G_NAND, name, q & 1 ? nlot[j] : lot[j], hits[j][q ^ 1]);
+            }
+    for (int d = 0; d < 6; d++) {
+        uint32_t in[5] = {hit[d], nalive};
+        int n = 2;
+        for (int j = 2; j >= 0; j--)
+            if (((d >> j) ^ 1) < groups[j])
+                in[n++] = ok[j][d >> j];
         snprintf(name, sizeof name, "gr%d", d);
-        grant[d] = gate2(b, G_AND, name, hit[d], free_);
-        snprintf(name, sizeof name, "hx%d", d);
-        b_gate2(b, G_AND, free_, free_, not1(b, name, hit[d]));
+        grant[d] = gate(b, G_AND, name, in, n);
     }
     for (int d = 0; d < 6; d++) {
         snprintf(name, sizeof name, "gi%d", d);
@@ -787,14 +957,14 @@ int gen_gamma(Program *p, int xbits, int ybits, int zbits, GammaCells *c)
         }
         b_full_adder(b, e3[i], sg, e3[i], y, sg);
     }
-    /* death: no energy, chance, or the parent of a new cell gone */
-    uint32_t death = gate(b, G_AND, "death", &x[3], GAMMA_DEATH_BITS);
+    /* death: no energy, the term up (0 at the start of the tick), the parent of a new cell gone */
+    uint32_t term_up = gate(b, G_NOR, "term_up", tm, GAMMA_TERM_BITS);
     uint32_t busyA = gate2(b, G_AND, "busyA", c->alive, c->busy), nbusyA = not1(b, "nbusyA", busyA);
     uint32_t emb = gate2(b, G_AND, "emb", busyA, c->embryo);
     uint32_t npk = not1(b, "npk", pK), pin[3] = {pA, pB, npk};
     uint32_t pok = gate(b, G_AND, "pok", pin, 3);
     uint32_t abort = gate2(b, G_AND, "abort", emb, not1(b, "npok", pok));
-    uint32_t die = gate2(b, G_OR, "die", starve, death);
+    uint32_t die = gate2(b, G_OR, "die", starve, term_up);
     b_gate2(b, G_AND, die, die, c->alive);
     b_gate2(b, G_OR, die, die, abort);
     uint32_t ndie = not1(b, "ndie", die), live = gate2(b, G_AND, "live", c->alive, ndie);
@@ -825,6 +995,22 @@ int gen_gamma(Program *p, int xbits, int ybits, int zbits, GammaCells *c)
         b_gate2(b, G_AND, cc, cc, c->counter[j]);
         b_gate2(b, G_AND, ct_n[j], ct_n[j], busyA);
     }
+    /* the term, in place (nothing reads it after this): a new cell's is 256 + 8 of its voxel's
+       dice bits, a living cell's one less, an empty voxel's and a dead cell's 0. The borrow of the
+       decrement runs up, kept inverted (a lower bit was 1): no NOT per bit. A new cell is never
+       alive, so its load is a multiplexer, not an AND and an OR. */
+    uint32_t tb = gate(b, G_BUF, "tm_b", &zero, 1), td[GAMMA_TERM_BITS];
+    for (int i = 0; i < GAMMA_TERM_BITS; i++) {
+        snprintf(name, sizeof name, "td%d", i);
+        td[i] = gate2(b, G_XNOR, name, tm[i], tb);
+        if (i + 1 < GAMMA_TERM_BITS)
+            b_gate2(b, G_OR, tb, tb, tm[i]);
+        b_gate2(b, G_AND, td[i], td[i], live);
+        if (i + 1 < GAMMA_TERM_BITS)
+            b_mux(b, tm[i], newborn, nnewborn, x[GAMMA_TERM_DICE + i], td[i]);
+        else
+            b_gate2(b, G_OR, tm[i], td[i], newborn);
+    }
     for (int i = 0; i < GAMMA_ENERGY_BITS; i++) {  /* newborn: half the parent's; alive: e3 */
         snprintf(name, sizeof name, "en%d", i);
         en[i] = gate2(b, G_AND, name, live, e3[i]);
@@ -833,6 +1019,11 @@ int gen_gamma(Program *p, int xbits, int ybits, int zbits, GammaCells *c)
             b_gate2(b, G_OR, en[i], en[i], gate2(b, G_AND, name, newborn, pE[i + 1]));
         }
     }
+    /* manna: at midnight whatever is above 127 rots, to 127 (a new cell holds at most 127) */
+    uint32_t rot = gate2(b, G_AND, "rot", midnight, en[GAMMA_ENERGY_BITS - 1]);
+    b_gate2(b, G_AND, en[GAMMA_ENERGY_BITS - 1], en[GAMMA_ENERGY_BITS - 1], not1(b, "nrot", rot));
+    for (int i = 0; i + 1 < GAMMA_ENERGY_BITS; i++)
+        b_gate2(b, G_OR, en[i], en[i], rot);
     uint32_t bin[3] = {emb, finish, ndie};
     uint32_t born_n = gate(b, G_AND, "born_n", bin, 3);
     for (int i = 0; i < GAMMA_GATES; i++)  /* a dead cell's gates are 0 */
@@ -888,7 +1079,15 @@ int gen_gamma(Program *p, int xbits, int ybits, int zbits, GammaCells *c)
     uint32_t nocc = not1(b, "lt_n", occa);
     for (int i = 0; i < GAMMA_LIGHT_BITS; i++) {
         b_mux(b, lt[i], occa, nocc, i + 1 < GAMMA_LIGHT_BITS ? la[i + 1] : zero, lt[i]);
-        b_gate2(b, G_OR, lt[i], lt[i], sun);  /* the sun plane: all ones */
+        /* the sun plane: the triangle wave of the clock, 2 * (ck < 128 ? ck : 255 - ck): bit 0
+           is 0, bit i is bit i - 1 of the clock, inverted in the afternoon */
+        if (i == 0) {
+            b_gate2(b, G_AND, lt[i], lt[i], nsun);
+        } else {
+            snprintf(name, sizeof name, "wv%d", i);
+            uint32_t wave = gate2(b, G_XOR, name, ck[i - 1], ck[GAMMA_CLOCK_BITS - 1]);
+            b_mux(b, lt[i], sun, nsun, wave, lt[i]);
+        }
         b_reg(b, L[i], lt[i]);
     }
     PART(GAMMA_PART_LIGHT);
@@ -972,6 +1171,8 @@ void gamma_to_cube(LaneCube *lc, const GammaCells *c, const GammaWorld *w)
             put(lm, c->partner, 3, lane, w->partner[v]);
             put(lm, c->counter, 5, lane, w->counter[v]);
             put(lm, c->energy, GAMMA_ENERGY_BITS, lane, w->energy[v]);
+            put(lm, c->clock, GAMMA_CLOCK_BITS, lane, w->clock[v]);
+            put(lm, c->term, GAMMA_TERM_BITS, lane, w->term[v]);
             for (int i = 0; i < GAMMA_GATES; i++)
                 put(lm, c->genome[i], GAMMA_GATE_BITS, lane, w->genome[GAMMA_GATES * v + i]);
             put(lm, c->gates, GAMMA_GATES, lane, w->gates[v]);
@@ -996,6 +1197,8 @@ void gamma_from_cube(const LaneCube *lc, const GammaCells *c, GammaWorld *w)
             w->partner[v] = (uint8_t)get(lm, c->partner, 3, lane);
             w->counter[v] = (uint8_t)get(lm, c->counter, 5, lane);
             w->energy[v] = (uint8_t)get(lm, c->energy, GAMMA_ENERGY_BITS, lane);
+            w->clock[v] = (uint8_t)get(lm, c->clock, GAMMA_CLOCK_BITS, lane);
+            w->term[v] = (uint16_t)get(lm, c->term, GAMMA_TERM_BITS, lane);
             for (int i = 0; i < GAMMA_GATES; i++)
                 w->genome[GAMMA_GATES * v + i] =
                     (uint16_t)get(lm, c->genome[i], GAMMA_GATE_BITS, lane);

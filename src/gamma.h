@@ -148,8 +148,9 @@ void   gamma_step(GammaWorld *w);  /* one tick; fills w->ledger */
 unsigned gamma_sun(unsigned clock);  /* the sun plane's light for a clock value */
 
 /* Every voxel's generator from seed (never 0); with probability `fraction` a cell with a random
-   genome, its term (one more draw, after the genome's) and `energy`; the clock at sunrise in every
-   voxel. The fields are left as they are. Returns the cells made. */
+   genome and `energy`, then one draw per cell for its term, in voxel order, after all the genomes
+   (so a seed gives the 11c soup, with terms); the clock at sunrise in every voxel. The fields are
+   left as they are. Returns the cells made. */
 size_t gamma_soup(GammaWorld *w, double fraction, unsigned energy, uint64_t seed);
 
 /* Adds the ledger of one tick to a sum; 1 if the two identities hold for `l`. */

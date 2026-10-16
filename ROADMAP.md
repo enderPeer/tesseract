@@ -22,12 +22,12 @@ a small LAN cluster of four Ubuntu machines; yours will differ.
 | 8 | Toward an operating system | 8a ✅ 8b ✅ 8c ⬜ | beta, a byte computer with a monitor: 16,384 of them, 1.3 × 10^9 instructions/s |
 | 9 | Real 1-bit hardware (FPGA) | ⬜ | |
 | 10 | Superoptimizer | ✅ | every library building block provably shortest; full adder 28 → 19, sort 2× faster |
-| 11 | Gamma: a world of cells on the cube | 11a ✅ 11b ✅ 11c ✅ 11d–11f ⬜ | cells that are NAND circuits evolve from a random soup, divide and feed each other; ~10,000 ticks/s for 32,768 voxels |
+| 11 | Gamma: a world of cells on the cube | 11a ✅ 11b ✅ 11c ✅ 11d ✅ 11e–11g ⬜ | cells that are NAND circuits evolve from a random soup, divide, feed each other, and live under day and night, manna, a term and the lot; ~11,000 ticks/s for 32,768 voxels |
 | – | ~~Control flow with lane masks~~ | parked | needs a new instruction (see the end) |
 
-**Open:** gamma's ecology (space is the limit, not energy: see 11c) and 11d (a live view), 10
-(optimize for the compiler's cost, not only the length), 7g (one cube across the cluster), 5c
-(AVX-512), 8c (more memory, networked betas), 9 (FPGA).
+**Open:** gamma's ecology (the floor knows no weather and holds 60 % of the cells: see 11d) and
+11e (a live view), 10 (optimize for the compiler's cost, not only the length), 7g (one cube across
+the cluster), 5c (AVX-512), 8c (more memory, networked betas), 9 (FPGA).
 
 ## 1. Reference machine ✅
 
@@ -1000,13 +1000,103 @@ caught, with 14–15 failures each: the gift not taken from the giver, a gift ma
 the grant read from the wrong side, and plain C not capping the sum of gifts.
 
 Next: measure where the gifts go (kin or strangers), and give the dark a way to be worth it; a live
-view (11d) to watch it.
+view to watch it.
 
-### 11d–11f ⬜
+### 11d. Weather, from the three books ✅
 
-- 11d `alpha gamma --serve`: a live page of the cube; click a cell to see its circuit.
-- 11e the twin world across the 16th dimension: butterfly and control modes.
-- 11f AVX-512 (5c), the world across the cluster (7g).
+The user asked what the Torah, the Quran and the Bible have for this world. Five rules, chosen
+for a world where space was the limit and nothing in a cell's senses changed; the passages and
+the reasons are in [docs/GAMMA.md](docs/GAMMA.md), the exact rules in [src/gamma.h](src/gamma.h):
+
+- **Day and night.** A clock in every voxel, 8 bits, incremented at the start of every tick; the
+  sun plane's light is a triangle wave of it, 0 at midnight, 254 at noon. The clock costs 92
+  instructions (8 half adders in place, no register, no segment cut); the wave 7 XORs and 7
+  multiplexers where the "OR with sun" was.
+- **Manna.** At midnight whatever a cell holds above 127 rots. Upkeep stays 1.
+- **An appointed term.** Each cell draws its term, 256–511 ticks, from its own dice in the tick it
+  is born, and dies when it is up. Death by chance is gone. A 9-bit countdown in place, loaded
+  through a multiplexer from the dice; 257 instructions, against 24 for the dice-bit death.
+- **The lot.** A contested vacancy goes to the asker in direction d with the smallest d XOR k, k
+  three dice bits of the empty voxel; 11b–11c gave it to the lowest d. A tree of ORs over groups
+  of directions and one NAND per bit and group: 151 instructions, 57 more than the scan it
+  replaces.
+- **The measure.** A ledger of every tick in the plain C, with two identities (energy and cells)
+  that the tests check after every tick of running worlds and the census prints: it is the
+  conservation law the 11c bugs would have failed.
+
+**How it was built.** With ultracode on: four independent critics (ecology, circuit, tests,
+fidelity to the texts) attacked the first design before a line was written, and two of them
+changed it: manna as a per-tick levy on wealth starves bodies, so it became the midnight loss;
+one term for all phase-locks the world into a death wave, so each cell draws its own. Then the
+contract went into gamma.h, four implementers built the plain C, the circuit, the tests and the
+census from it in parallel worktrees, five reviewers tried to refute each patch and cross-checked
+plain C against circuit, and the four patches merged with disjoint hunks. The merged program
+passed `test_gamma` on the first run.
+
+One tick of the 32 × 32 × 32 world: 52,628 instructions in 4 segments (11c: 52,084): where am I
+616, clock 92, dice 488, neighbour reads 3,528, gates 33,964, asking and offering 180, grants
+2,539, partner reads 2,683, energy and state 2,749, genome copy 3,437, light 356, minerals 1,828,
+registers 168.
+
+The same world under both rules, seed 1, a million ticks, on the same machine in the same
+session (11c rebuilt from its commit next to 11d):
+
+| at tick 1,000,000 | 11c | 11d |
+|---|---:|---:|
+| cells | 5,575 | 6,182 |
+| cells dividing | 148 | 1,242 |
+| distinct genomes | 3,149 | 3,325 |
+| energy per cell | 207 | 145 (84 at midnight, 153 by day) |
+| deaths per tick | ~3 (by chance) | 17.4: term 13.9, starved 2.1, aborted 1.4 |
+| free cells asking | 90 % | 69 % |
+| asks that get a voxel | 0.0–0.1 % | 0.4–0.9 % |
+| free cells giving | 12.8 % | 1–2 % |
+| energy given per tick | 13,900 | 300–900, of which 3–17 % to a cell of the giver's genome |
+| what midnight takes, per day | — | ~340,000 at noon (55 per cell) |
+| gains per tick at noon: light / minerals / lost at the cap | — | 10,700 / 11,800 / 12,200 |
+| grants per tick by the winner's direction (+x −x +y −y down up) | — | 1.4 2.7 2.2 3.0 7.3 2.9 |
+| cells in the 24 layers between canopy and floor | 0 | 0 |
+| cells in the canopy band / the floor band | 2,389 / 3,186 | 2,468 / 3,714 |
+| ticks/s, 16 threads | 11,500 | 11,000 |
+
+What it says:
+- **The world turns over six times faster**, and it is bigger, not smaller: a tenth more cells.
+  The term alone kills 14 a tick, the nights starve 2, and 7 % of divisions abort because the
+  parent's term ends during the copy, as the critics predicted.
+- **Asking pays now.** Five to ten times more asks succeed. Every one of the three most common
+  genomes reads the occupancy of its neighbours on all three axes to pick a direction, and they
+  share a family: gate 5 = NAND(cell at −x, cell at −y), gate 10 reading itself (a 1-bit memory),
+  direction bit 1 = NAND(cell at −y, cell at +y). Most grants go to the cell below the vacancy:
+  cells divide upward, towards the light at the canopy and away from the floor.
+- **Unconditional giving was selected away** at the first nights, as predicted: an eighth of the
+  free cells gave in 11c, one to two in a hundred do now, and they give on conditions ("unless
+  there is a cell below", "unless both up and down are taken"). The gifts that remain go to kin
+  far above chance (a random neighbour shares the giver's genome in 0.2 % of cases).
+- **Energy is still not scarce.** By day the cells sit at the cap and 12,000 a tick are lost
+  there, more than all the upkeep; the night only makes it swing. The floor knows no weather
+  (minerals have no day) and holds 60 % of the cells; nothing lives in the dark middle.
+
+Done: `test_gamma`, 75 checks, every expected value computed by an independent model of the
+contract: the sun at seven clocks and the light of an empty column after 1, 16, 143 and 300 ticks;
+the division with the new cell's term read from its dice; a cell with term 2; a parent whose term
+is up in the tick it is granted, and its embryo's abort; the lot decided by the voxel's dice; the
+midnight on a cell at 200, at 100, and on a newborn; the ledger after every tick of two soups,
+both identities from the arrays and received = given, no term past 511, the clock the same
+everywhere; the engine checks from random states of everything including clock and term, and
+compiled against plain C on 14 shapes, through midnights and term deaths, with threads. The
+whole suite is 2,664 checks under gcc. Five injected bugs were all caught, with 14–22 failures
+each naming the field: the lot and the term read from the wrong dice bits, the term up one tick
+late, the sun wave folded on the wrong clock bit, a midnight that never rots.
+
+Next: the floor. Minerals know no day and the floor zone sits at the cap; a season for the
+minerals, or a finite floor that must rest (Leviticus 25:4), would give the weather the other half
+of the world. And the live view.
+
+### 11e–11g ⬜
+
+- 11e `alpha gamma --serve`: a live page of the cube; click a cell to see its circuit.
+- 11f the twin world across the 16th dimension: butterfly and control modes.
+- 11g AVX-512 (5c), the world across the cluster (7g).
 
 Details in [docs/GAMMA.md](docs/GAMMA.md).
 

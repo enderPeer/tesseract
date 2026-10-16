@@ -44,6 +44,13 @@ and signals do with it once it exists, and lets you prove what evolved.
 - **2026-10-16: no cost for asking; bodies instead.** The competition for space is enough once
   the tick no longer handicaps the cells that look (see Bodies). Cells stay one voxel; organisms
   grow by division and sharing energy.
+- **2026-10-16: weather, from the three books.** Space, not energy, limited the 11c world, and
+  nothing in a cell's senses changed. The user asked what the Torah, the Quran and the Bible have
+  for this world; the mechanisms chosen are the ones that put rhythm, finitude, death and chance
+  into it (see Weather), checked by four independent critics before they were built. Two of them
+  changed the first draft: manna is not a tax on wealth every tick (that destroys exactly the
+  surplus a body would carry into the dark) but a loss at midnight of what is kept; and one term
+  for every cell would lock the whole world into a death wave, so each cell draws its own.
 
 ## The world (step 11a)
 
@@ -51,9 +58,9 @@ A torus of 2^a × 2^b × 2^c voxels, 512 to 65,536 of them, one per machine. Eac
 own dimensions of the cube in Gray code, x lowest, so every face neighbour is one link away (step
 7e's grids, with a third axis). z = 0 is the sun plane at the top; the last layer is the floor.
 
-- **Light** (0 .. 255) falls one voxel per tick. The sun plane gets 255. Every other voxel gets the
-  light of the voxel above it, of which an empty voxel passes on l − l/8 and one with a cell in it
-  l/2, so shade forms under the cells.
+- **Light** (0 .. 255) falls one voxel per tick. The sun plane gets the sun (255 until 11d; a
+  day's wave since). Every other voxel gets the light of the voxel above it, of which an empty
+  voxel passes on l − l/8 and one with a cell in it l/2, so shade forms under the cells.
 - **Minerals** (0 .. 4095: the 8 bits a cell sees and 4 more below the point) diffuse up from the
   floor. The floor gets 4095 and the sun plane 0. In between a voxel gets (2m + its 6 neighbours) /
   8, rounded down, less what a cell eats there, plus what a dying cell gives back. With whole
@@ -77,8 +84,8 @@ own dimensions of the cube in Gray code, x lowest, so every face neighbour is on
   parent's genome, each gate flipped in one bit with probability 1/64 on the way. The new cell gets
   half the parent's energy, and dies if its parent does.
 - **Energy:** every tick a cell gains light/32 + minerals/512 (0 .. 7 each, and eats those
-  minerals), at most 255, and pays 1. It dies with nothing left, or by chance (1/2048 per tick),
-  and gives back 512 minerals.
+  minerals), at most 255, and pays 1. It dies with nothing left, or when its term is up (by
+  chance, 1/2048 per tick, until 11d), and gives back 512 minerals.
 - **Dice:** every voxel has its own xorshift32 generator, so the whole world is deterministic and
   every run can be replayed bit for bit.
 
@@ -105,6 +112,44 @@ the senses was the order of the tick, and that nothing could be done with surplu
 has light at the top and minerals at the floor with 24 empty layers between; a body that spans them
 is the first thing that can live there. And sharing creates something to cheat on.
 
+## Weather (step 11d): from the three books
+
+What the Torah, the Quran and the Bible have for a world where space is the limit and nothing in
+a cell's senses changes: rhythm, finitude, death and chance. The exact rules are in
+[src/gamma.h](../src/gamma.h). (Quran verses are given in the standard numbering; the edition the
+user attached counts the opening formula as verse 1, so its numbers are one higher.)
+
+- **Day and night** (Genesis 1:14 and 8:22, the lights for days and years, and "day and night
+  shall not cease"; Quran 2:164, the alternation of night and day). Every voxel holds the same
+  8-bit clock, incremented at the start of every tick, so a day is 256 ticks. The sun plane's light
+  is a triangle wave of the clock, 0 at midnight, 254 at noon, instead of a constant 255. A
+  triangle, not a square: the second canopy layer cannot survive 128 ticks of darkness, 64 it can.
+  Minerals know no day, so the floor keeps its constant income; the weather is the canopy's.
+- **Manna** (Exodus 16:18–21: everyone gathers what they need, what is kept past morning rots;
+  Luke 12:20, the rich fool and his barns). At midnight whatever a cell holds above 127, an omer,
+  is lost. Upkeep stays 1 and starving stays "nothing left". Hoarding is futile, and a gift of the
+  surplus before midnight costs the giver nothing it would have kept.
+- **An appointed term** (Quran 6:60 and 6:2, a term decreed for each soul and unknown to it; John
+  12:24, the grain that must die to bear fruit). Every cell carries a term, drawn from its own dice
+  in the tick it is born, 256 to 511 ticks, and dies when it is up. Death by chance is gone. One
+  term for all would have locked the world into a death wave: every vacancy is refilled within a
+  tick, so a cohort born together dies together, forever.
+- **The lot** (Numbers 26:55, the land apportioned by lot; Quran 37:141, Jonah's lot; Acts 1:26,
+  the lot that fell on Matthias). When cells ask for the same empty voxel, the voxel draws three of
+  its dice bits k and grants the asker in direction d with the smallest d XOR k. Until 11d the
+  lowest direction always won, so a +x neighbour beat everyone, and a cell could learn the order
+  instead of the world.
+- **The measure** (Quran 54:49, everything in due measure; Exodus 16:18, no excess and no
+  deficiency). A ledger of every tick, in the plain C: what the cells gained, paid, moved and lost,
+  births and deaths by cause. Two identities must hold every tick, energy and cells, and the tests
+  check them on running worlds. It is the conservation law the 11c bugs would have failed.
+
+Not taken, and why: a per-tick levy on wealth (the first draft of manna) was shown to starve
+bodies; seasons (Genesis 8:22) wait for a model of their own, since a winter whose peak is 127
+kills the second layer and the canopy cannot be recolonised from the floor; the gleanings
+(Leviticus 19:9) as a cap on the harvest do not open the dark; eating one another (Genesis 9:3) is
+the bigger lever but a step of its own.
+
 ## What it does so far
 
 From a soup of 10 % random cells the world fills the sunlit top layers and the mineral-rich floor;
@@ -118,6 +163,13 @@ a child starves. Space is the limit, not energy, which sits near the cap. An eig
 give energy away and clonal bodies of up to 13 cells form, but no body feeds a cell in the dark
 yet. The numbers are in ROADMAP step 11c.
 
+Under the weather (11d) the world turns over six times faster and is a tenth bigger; five to ten
+times more asks succeed, and the common genomes pick their direction from the occupancy of all
+three axes, with a one-bit memory. Unconditional giving was selected away at the first nights;
+what remains gives on conditions and goes to kin far above chance. Energy is still not scarce by
+day, the floor knows no weather, and the dark middle is still empty. ROADMAP step 11d has the
+numbers side by side with 11c.
+
 ## Steps
 
 | | | |
@@ -125,6 +177,7 @@ yet. The numbers are in ROADMAP step 11c.
 | 11a | the world: 3-D torus, light and minerals, checked against plain C, timed | ✅ |
 | 11b | cells: genome, senses, division with mutation, energy, death; evolution from a random soup | ✅ |
 | 11c | bodies: energy given from cell to cell, and asking, granting and being born in one tick | ✅ |
-| 11d | `alpha gamma --serve`: a page that draws the cube live; click a cell to see its circuit | ⬜ |
-| 11e | the twin world across the 16th dimension: butterfly and control modes | ⬜ |
-| 11f | AVX-512 (5c), the world across the cluster (7g) | ⬜ |
+| 11d | weather, from the three books: day and night, manna, an appointed term, the lot, the measure | ✅ |
+| 11e | `alpha gamma --serve`: a page that draws the cube live; click a cell to see its circuit | ⬜ |
+| 11f | the twin world across the 16th dimension: butterfly and control modes | ⬜ |
+| 11g | AVX-512 (5c), the world across the cluster (7g) | ⬜ |
