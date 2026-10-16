@@ -76,7 +76,8 @@ static void usage(void)
           "  --check C      ticks checked against plain C, every voxel (default 100)\n"
           "  --ticks T      ticks in all (default 10000), a census every K (default T/10)\n"
           "  --seconds S    or stop at the first census after S seconds of running\n"
-          "  --show         at the end, a slice through the world\n",
+          "  --show         at the end, a slice through the world\n"
+          "  --genes N      at the end, the N most common genomes as circuits\n",
           stderr);
 }
 
@@ -131,46 +132,93 @@ static size_t kinds_of(const GammaWorld *w, Kind **kinds)
 
 static void census_head(unsigned Z)
 {
-    printf("\n%9s %7s %8s %8s %6s %7s %6s %6s  cells by depth: z 0-%u | %u-%u | %u-%u | %u-%u\n",
-           "tick", "cells", "dividing", "genomes", "top", "energy", "ask", "aim", Z / 4 - 1, Z / 4,
-           Z / 2 - 1, Z / 2, 3 * Z / 4 - 1, 3 * Z / 4, Z - 1);
+    printf("\n%9s %7s %8s %8s %6s %7s %6s %6s %6s %7s %7s %7s  cells by depth: z 0-%u | %u-%u | "
+           "%u-%u | %u-%u\n", "tick", "cells", "dividing", "genomes", "top", "energy", "ask", "got",
+           "give", "flow", "bodies", "largest", Z / 4 - 1, Z / 4, Z / 2 - 1, Z / 2, 3 * Z / 4 - 1,
+           3 * Z / 4, Z - 1);
 }
 
-/* ask: of the cells free to divide, how many ask to; aim: of those, how many ask for an empty
-   voxel (blind asking hits empty voxels about as often as there are empty neighbours: free) */
+/* The bodies: connected groups of 2 or more cells with the same genome (face neighbours, the
+   cells being born left out). Returns how many; *largest gets the biggest, *in_bodies the cells
+   in them. */
+static size_t bodies(const GammaWorld *w, size_t *largest, size_t *in_bodies)
+{
+    uint64_t *h = malloc(w->n * sizeof *h);
+    unsigned char *seen = calloc(w->n, 1);
+    size_t *stack = malloc(w->n * sizeof *stack), n = 0;
+    *largest = *in_bodies = 0;
+    for (size_t v = 0; v < w->n; v++)
+        h[v] = w->alive[v] && !(w->busy[v] && w->embryo[v]) ? genome_hash(w->genome + GAMMA_GATES * v)
+                                                              : 0;
+    for (size_t v = 0; v < w->n; v++) {
+        if (!h[v] || seen[v])
+            continue;
+        size_t size = 0, sp = 0;
+        stack[sp++] = v;
+        seen[v] = 1;
+        while (sp) {
+            size_t u = stack[--sp];
+            size++;
+            for (int d = 0; d < 6; d++) {
+                size_t t = gamma_neighbour(w, u, d);
+                if (h[t] == h[v] && !seen[t]) {
+                    seen[t] = 1;
+                    stack[sp++] = t;
+                }
+            }
+        }
+        if (size >= 2) {
+            n++;
+            *in_bodies += size;
+            if (size > *largest)
+                *largest = size;
+        }
+    }
+    free(h);
+    free(seen);
+    free(stack);
+    return n;
+}
+
+/* ask: of the cells that were free at the start of the tick, how many asked to divide; got: of
+   those, how many were granted a voxel (they are busy now, with the counter at 0); give: of the
+   free cells, how many gave energy away; flow: the energy given, per tick. */
 static void census(const GammaWorld *w, unsigned long long tick)
 {
     unsigned Z = 1u << w->zbits;
-    size_t cells = 0, dividing = 0, band[4] = {0, 0, 0, 0}, free_ = 0, ask = 0, aim = 0;
-    double energy = 0, empty = 0;
+    size_t cells = 0, dividing = 0, band[4] = {0, 0, 0, 0}, free_ = 0, ask = 0, got = 0, give = 0;
+    size_t nbodies, largest, in_bodies;
+    double energy = 0, flow = 0;
     for (size_t v = 0; v < w->n; v++) {
         if (!w->alive[v])
             continue;
-        unsigned z = (unsigned)(v >> (w->xbits + w->ybits)), dir = w->gates[v] >> 29 & 7;
+        unsigned z = (unsigned)(v >> (w->xbits + w->ybits));
         cells++;
         dividing += w->busy[v];
         energy += w->energy[v];
         band[z * 4 / Z]++;
-        if (w->busy[v] || w->energy[v] < GAMMA_DIVIDE_MIN)
+        flow += w->offer[v];
+        if (w->busy[v] && (w->embryo[v] || w->counter[v] > 0))  /* was busy before the tick */
             continue;
         free_++;
-        for (int d = 0; d < 6; d++)
-            empty += !w->alive[gamma_neighbour(w, v, d)];
+        give += w->offer[v] > 0;
         if (w->request[v]) {
             ask++;
-            aim += !w->alive[gamma_neighbour(w, v, (int)dir)];
+            got += w->busy[v];
         }
     }
     Kind *k;
     size_t nk = kinds_of(w, &k), settled = 0;
     for (size_t i = 0; i < nk; i++)
         settled += k[i].count;
-    printf("%9llu %7zu %8zu %8zu %5.1f%% %7.1f %5.1f%% %5.1f%%  %7zu | %5zu | %5zu | %5zu"
-           "   (empty neighbours %.1f%%)\n", tick, cells, dividing, nk,
+    nbodies = bodies(w, &largest, &in_bodies);
+    printf("%9llu %7zu %8zu %8zu %5.1f%% %7.1f %5.1f%% %5.1f%% %5.1f%% %7.0f %7zu %7zu  %7zu | "
+           "%5zu | %5zu | %5zu\n", tick, cells, dividing, nk,
            settled ? 100.0 * (double)k[0].count / (double)settled : 0.0,
            cells ? energy / (double)cells : 0.0, free_ ? 100.0 * (double)ask / (double)free_ : 0.0,
-           ask ? 100.0 * (double)aim / (double)ask : 0.0, band[0], band[1], band[2], band[3],
-           free_ ? 100.0 * empty / 6 / (double)free_ : 0.0);
+           ask ? 100.0 * (double)got / (double)ask : 0.0,
+           free_ ? 100.0 * (double)give / (double)free_ : 0.0, flow, nbodies, largest, band[0],
+           band[1], band[2], band[3]);
     fflush(stdout);
     free(k);
 }
@@ -203,11 +251,115 @@ static void print_slice(const GammaWorld *w)
     free(k);
 }
 
+/* ---- a genome as a circuit ---------------------------------------------------------------- */
+
+static const char *const dir_name[6] = {"+x", "-x", "+y", "-y", "down", "up"};
+
+/* the name of source a (0 .. 63) of a gate: a sense, or a gate */
+static void source_name(unsigned a, char *buf, size_t len)
+{
+    if (a == 0)
+        snprintf(buf, len, "1");
+    else if (a < 4)
+        snprintf(buf, len, "rnd%u", a - 1);
+    else if (a < 10)
+        snprintf(buf, len, "occ:%s", dir_name[a - 4]);
+    else if (a < 22)
+        snprintf(buf, len, "sig:%s.%u", dir_name[(a - 10) / 2], (a - 10) % 2);
+    else if (a < 25)
+        snprintf(buf, len, "E%u", 29 - a);  /* the top bits: E7, E6, E5 */
+    else if (a < 28)
+        snprintf(buf, len, "L%u", 32 - a);
+    else if (a < 31)
+        snprintf(buf, len, "M%u", 39 - a);
+    else if (a == 31)
+        snprintf(buf, len, "born");
+    else
+        snprintf(buf, len, "g%u", a - 32);
+}
+
+/* One genome as a circuit: every gate with its two sources, which gates feed the actions (gates
+   26 .. 31, backwards along the wires), and which are constant whatever the senses say (a NAND
+   with a 0 input is 1, with two 1 inputs 0; repeated until nothing changes, since later gates
+   feed earlier ones a tick later). */
+static void print_genome(const uint16_t *g)
+{
+    static const char *const action[7] = {"  <- give", "  <- signal 0", "  <- signal 1",
+                                          "  <- divide", "  <- dir bit 0", "  <- dir bit 1",
+                                          "  <- dir bit 2"};
+    int live[GAMMA_GATES] = {0}, val[64], stack[GAMMA_GATES], n = 0;
+    for (int i = GAMMA_GIVE; i < GAMMA_GATES; i++)
+        live[stack[n++] = i] = 1;
+    while (n) {
+        int i = stack[--n];
+        for (int h = 0; h < 2; h++) {
+            unsigned a = g[i] >> (GAMMA_ADDR_BITS * h) & 63;
+            if (a >= 32 && !live[a - 32])
+                live[stack[n++] = (int)a - 32] = 1;
+        }
+    }
+    for (int a = 0; a < 64; a++)
+        val[a] = a == 0 ? 1 : -1;  /* -1: depends on the senses */
+    for (int changed = 1; changed;) {
+        changed = 0;
+        for (int i = 0; i < GAMMA_GATES; i++) {
+            int a = val[g[i] & 63], b = val[g[i] >> GAMMA_ADDR_BITS & 63];
+            int v = a == 0 || b == 0 ? 1 : a == 1 && b == 1 ? 0 : -1;
+            if (v != val[32 + i]) {
+                val[32 + i] = v;
+                changed = 1;
+            }
+        }
+    }
+    int nlive = 0, dir = 0, dir_known = 1;
+    for (int i = 0; i < GAMMA_GATES; i++)
+        nlive += live[i];
+    for (int j = 0; j < 3; j++) {
+        if (val[32 + GAMMA_DIVIDE + 1 + j] < 0)
+            dir_known = 0;
+        dir |= val[32 + GAMMA_DIVIDE + 1 + j] == 1 ? 1 << j : 0;
+    }
+    static const char *const fixed[3] = {"always off", "always on", "decided by the senses"};
+    printf("  %d of 32 gates feed the actions; divide is %s, give is %s, the direction %s\n", nlive,
+           fixed[val[32 + GAMMA_DIVIDE] < 0 ? 2 : val[32 + GAMMA_DIVIDE]],
+           fixed[val[32 + GAMMA_GIVE] < 0 ? 2 : val[32 + GAMMA_GIVE]],
+           !dir_known ? "decided by the senses" : dir < 6 ? dir_name[dir] : "none (6 or 7)");
+    for (int i = 0; i < GAMMA_GATES; i++) {
+        char a[24], b[24];
+        source_name(g[i] & 63, a, sizeof a);
+        source_name(g[i] >> GAMMA_ADDR_BITS & 63, b, sizeof b);
+        printf("  %c g%-2d = NAND(%-10s %-10s)%s%s\n", live[i] ? '*' : ' ', i, a, b,
+               val[32 + i] < 0 ? "" : val[32 + i] ? "  = 1 always" : "  = 0 always",
+               i >= GAMMA_GIVE ? action[i - GAMMA_GIVE] : "");
+    }
+}
+
+/* the n most common genomes, 'A', 'B', .. as in the slice */
+static void print_genomes(const GammaWorld *w, int n)
+{
+    Kind *k;
+    size_t nk = kinds_of(w, &k), settled = 0;
+    for (size_t i = 0; i < nk; i++)
+        settled += k[i].count;
+    printf("\nthe %d most common genomes of %zu, '*' marks the gates that feed the actions:\n",
+           n < (int)nk ? n : (int)nk, nk);
+    for (int i = 0; i < n && (size_t)i < nk; i++) {
+        size_t v = 0;
+        while (v < w->n && !(w->alive[v] && !(w->busy[v] && w->embryo[v]) &&
+                             genome_hash(w->genome + GAMMA_GATES * v) == k[i].hash))
+            v++;
+        printf("\ngenome %c: %zu cells (%.1f %%)\n", 'A' + i, k[i].count,
+               100.0 * (double)k[i].count / (double)settled);
+        print_genome(w->genome + GAMMA_GATES * v);
+    }
+    free(k);
+}
+
 /* ---- the command -------------------------------------------------------------------------- */
 
 int cmd_gamma(int argc, char **argv)
 {
-    int bits[3] = {5, 5, 5}, threads = 0, idle = 0, show = 0;
+    int bits[3] = {5, 5, 5}, threads = 0, idle = 0, show = 0, genes = 0;
     unsigned long long settle = 2000, check = 100, ticks = 10000, every = 0, seed = 1;
     double soup = 10, seconds = 0;
     unsigned energy = 64;
@@ -248,6 +400,8 @@ int cmd_gamma(int argc, char **argv)
         } else if (!strcmp(a, "--show")) {
             show = 1;
             continue;
+        } else if (!strcmp(a, "--genes") && v) {
+            genes = atoi(v);
         } else {
             usage();
             return 2;
@@ -350,6 +504,8 @@ int cmd_gamma(int argc, char **argv)
         }
         if (show)
             print_slice(&got);
+        if (genes > 0)
+            print_genomes(&got, genes);
         if (run)
             printf("\n%d thread%s: %.3g ticks/s, %.1f us per tick, %.3g voxel updates/s, %.1f T "
                    "1-bit ops/s\n", k, k > 1 ? "s" : "", (double)run / busy_s,

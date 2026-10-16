@@ -1,7 +1,7 @@
 /* Tests for gamma (step 11): the world in plain C against hand-worked cases (the fields, a
-   hand-written cell that divides, grants, death), the voxels' places on the cube, and the world's
-   NAND/STO program on every engine against plain C, from random states of everything. Run from the
-   project root. */
+   hand-written cell that divides, grants, death, energy given from cell to cell), the voxels' places
+   on the cube, and the world's NAND/STO program on every engine against plain C, from random states
+   of everything. Run from the project root. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,6 +57,7 @@ static void random_world(GammaWorld *w, uint64_t *s)
         w->energy[v] = (uint8_t)(r >> 12);
         w->request[v] = (uint8_t)(r >> 20 & 1);
         w->born[v] = (uint8_t)((r >> 21 & 7) == 0);
+        w->offer[v] = (uint8_t)(r >> 40 & 31);
         w->light[v] = (uint8_t)(r >> 24);
         w->mineral[v] = (uint16_t)(r >> 32 & GAMMA_MINERAL_MAX);
         w->gates[v] = (uint32_t)rnd(s);
@@ -79,6 +80,7 @@ static void put_cell(GammaWorld *w, size_t v, const uint16_t *genome, unsigned e
 {
     w->alive[v] = 1;
     w->busy[v] = w->embryo[v] = w->partner[v] = w->counter[v] = w->request[v] = w->born[v] = 0;
+    w->offer[v] = 0;
     w->energy[v] = (uint8_t)energy;
     w->gates[v] = 0;
     w->rng[v] = rng;
@@ -90,16 +92,25 @@ static uint16_t gate_of(int a, int b)
     return (uint16_t)(a | b << GAMMA_ADDR_BITS);
 }
 
-/* the hand-written cell of the tests: asks to divide in direction dir whenever it can. Gate 0 is
-   NAND(1, 1) = 0; gate 28 and the direction bits that are 1 are NAND(gate 0, gate 0) = 1. */
-static void plant(uint16_t *genome, int dir)
+/* The hand-written cells of the tests, which exist only here. Gate 0 is NAND(1, 1) = 0, and
+   every gate that should be 1 is NAND(gate 0, gate 0). cell(): direction dir, dividing and giving
+   as asked; plant(): divides in direction dir whenever it can. */
+static void cell(uint16_t *genome, int dir, int divide, int give)
 {
     for (int i = 0; i < GAMMA_GATES; i++)
         genome[i] = gate_of(0, 0);
-    genome[GAMMA_DIVIDE] = gate_of(32, 32);
+    if (divide)
+        genome[GAMMA_DIVIDE] = gate_of(32, 32);
+    if (give)
+        genome[GAMMA_GIVE] = gate_of(32, 32);
     for (int j = 0; j < 3; j++)
         if (dir >> j & 1)
             genome[GAMMA_DIVIDE + 1 + j] = gate_of(32, 32);
+}
+
+static void plant(uint16_t *genome, int dir)
+{
+    cell(genome, dir, 1, 0);
 }
 
 /* ---- the fields --------------------------------------------------------------------------- */
@@ -208,22 +219,19 @@ static void test_division(void)
     put_cell(&w, pv, g, 100, w.rng[pv]);
     uint32_t crng = w.rng[cv];
 
-    gamma_step(&w);  /* tick 1: the gates run and ask */
-    CHECK(w.alive[pv] && !w.busy[pv] && w.request[pv] && (w.gates[pv] >> 28) == (1 | 5 << 1),
-          "tick 1: the plant asks to divide upwards (gates %08x)", w.gates[pv]);
     unsigned e = w.energy[pv], gain = (w.light[pv] >> 5) + (w.mineral[pv] >> 9);
-    gamma_step(&w);  /* tick 2: granted */
-    CHECK(w.busy[pv] && !w.embryo[pv] && w.partner[pv] == 5 && w.counter[pv] == 0 &&
-              w.alive[cv] && w.busy[cv] && w.embryo[cv] && w.partner[cv] == 4 && w.counter[cv] == 0,
-          "tick 2: the voxel above grants it, both are busy, each pointing at the other");
+    gamma_step(&w);  /* tick 1: the gates run, the plant asks, the voxel above grants it */
+    CHECK(w.request[pv] && (w.gates[pv] >> 28) == (1 | 5 << 1) && w.busy[pv] && !w.embryo[pv] &&
+              w.partner[pv] == 5 && w.counter[pv] == 0 && w.alive[cv] && w.busy[cv] &&
+              w.embryo[cv] && w.partner[cv] == 4 && w.counter[cv] == 0,
+          "tick 1: the plant asks to divide upwards (gates %08x), the voxel above grants it in the "
+          "same tick, both are busy, each pointing at the other", w.gates[pv]);
     CHECK(w.energy[cv] == e / 2 && (unsigned)(w.energy[pv] + w.energy[cv]) == e + gain - 1,
-          "tick 2: the new cell gets half the parent's %u, the parent keeps the rest (%u + %u, "
+          "tick 1: the new cell gets half the parent's %u, the parent keeps the rest (%u + %u, "
           "gain %u, upkeep 1)", e, w.energy[pv], w.energy[cv], gain);
     for (int t = 0; t < GAMMA_GATES; t++)
-        gamma_step(&w);  /* ticks 3 .. 34: one gate a tick */
-    uint32_t r = crng;
-    for (int t = 0; t < 2; t++)
-        r = xorshift32(r);
+        gamma_step(&w);  /* ticks 2 .. 33: one gate a tick */
+    uint32_t r = xorshift32(crng);  /* the new cell's dice rolled in tick 1 too */
     int bad = 0, flips = 0;
     for (int i = 0; i < GAMMA_GATES; i++) {
         r = xorshift32(r);  /* the new cell's dice in the tick that brought in gate i */
@@ -264,7 +272,6 @@ static void test_division(void)
     put_cell(&d, a, right, 100, 7);
     put_cell(&d, bl, g, 100, 7);
     gamma_step(&d);
-    gamma_step(&d);
     CHECK(d.embryo[t] && d.partner[t] == 1 && d.busy[a] && !d.busy[bl] && d.request[bl],
           "two cells ask for one voxel: the one in the lower direction gets it, the other keeps "
           "asking");
@@ -274,6 +281,47 @@ static void test_division(void)
     gamma_step(&d);
     CHECK(!d.alive[t], "a new cell dies with its parent");
     gamma_world_free(&d);
+    gamma_world_free(&w);
+}
+
+/* energy given from cell to cell: a giver and a taker side by side, a chain of three, a gift to
+   nobody, the cap */
+static void test_sharing(void)
+{
+    GammaWorld w;
+    gamma_world_init(&w, 3, 3, 3);  /* no light, no minerals: gains are only gifts */
+    uint16_t giver[GAMMA_GATES], taker[GAMMA_GATES];
+    cell(giver, 0, 0, 1);  /* gives towards +x, never divides */
+    cell(taker, 0, 0, 0);
+    for (size_t v = 0; v < w.n; v++)
+        w.rng[v] = 7;
+    size_t a = gamma_voxel(&w, 1, 1, 1), b = gamma_voxel(&w, 2, 1, 1), c = gamma_voxel(&w, 3, 1, 1);
+    size_t lone = gamma_voxel(&w, 5, 5, 5), full = gamma_voxel(&w, 6, 6, 6), fg = gamma_voxel(&w, 5, 6, 6);
+    put_cell(&w, a, giver, 80, 7);
+    put_cell(&w, b, giver, 40, 7);  /* takes from a, gives to c */
+    put_cell(&w, c, taker, 40, 7);
+    put_cell(&w, lone, giver, 80, 7);  /* nothing at its +x */
+    gamma_step(&w);
+    CHECK(w.offer[a] == 10 && w.energy[a] == 80 - 1 - 10,
+          "a cell with 80 energy and the give gate on offers an eighth, 10, and keeps 69 (offer %u, "
+          "energy %u)", w.offer[a], w.energy[a]);
+    CHECK(w.offer[b] == 5 && w.energy[b] == 40 + 10 - 1 - 5 && w.offer[c] == 0 &&
+              w.energy[c] == 40 + 5 - 1,
+          "in the chain the middle cell takes 10 and gives 5 of its own 40 (%u), the last takes 5 "
+          "(%u)", w.energy[b], w.energy[c]);
+    CHECK(w.offer[lone] == 0 && w.energy[lone] == 79, "a gift to an empty voxel is not made (%u)",
+          w.energy[lone]);
+    gamma_step(&w);
+    CHECK(w.offer[a] == 8 && w.energy[a] == 69 - 1 - 8 && w.energy[c] == 44 + 5 - 1,
+          "the next tick: an eighth of 69 is 8 (offer %u, energy %u), the last cell takes 5 again "
+          "(%u)", w.offer[a], w.energy[a], w.energy[c]);
+    /* the cap: a full cell takes nothing it cannot hold */
+    put_cell(&w, full, taker, 255, 7);
+    put_cell(&w, fg, giver, 200, 7);
+    gamma_step(&w);
+    CHECK(w.offer[fg] == 25 && w.energy[fg] == 200 - 1 - 25 && w.energy[full] == 254,
+          "a cell at 255 is offered 25 and stays at the cap less upkeep (%u, the giver %u)",
+          w.energy[full], w.energy[fg]);
     gamma_world_free(&w);
 }
 
@@ -466,6 +514,7 @@ int main(void)
     uint64_t s = 0x6A33A;
     test_fields();
     test_division();
+    test_sharing();
     test_soup();
     test_places();
     on_reference(3, 3, 3, 2, &s);

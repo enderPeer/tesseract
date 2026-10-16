@@ -41,6 +41,9 @@ and signals do with it once it exists, and lets you prove what evolved.
   copy its genome (Universe 2's way), random genomes would almost never manage it, and the world
   would need a hand-written ancestor. A hand-written cell exists only in the tests, as a fixture
   whose every step can be predicted.
+- **2026-10-16: no cost for asking; bodies instead.** The competition for space is enough once
+  the tick no longer handicaps the cells that look (see Bodies). Cells stay one voxel; organisms
+  grow by division and sharing energy.
 
 ## The world (step 11a)
 
@@ -65,8 +68,8 @@ own dimensions of the cube in Gray code, x lowest, so every face neighbour is on
 - **Senses:** a constant 1, three random bits, which of the 6 neighbours hold a cell, 2 signal bits
   from each neighbour, the top 3 bits of the cell's energy, of the light and of the minerals where
   it is, and "I was just born".
-- **Actions:** gates 26 and 27 are the signals the neighbours see; gate 28 asks to divide, gates
-  29–31 say in which direction.
+- **Actions:** gates 26 and 27 are the signals the neighbours see; gate 25 gives energy, gate 28
+  asks to divide, gates 29–31 say in which direction, for both.
 - **Division:** a cell asks when it is free and has energy 32 or more. An empty voxel grants one
   of the cells asking for it, the lowest direction first, and the cell learns it in the same tick.
   For the next 32 ticks both are busy and do not run their gates: every tick the parent's genome
@@ -79,17 +82,41 @@ own dimensions of the cube in Gray code, x lowest, so every face neighbour is on
 - **Dice:** every voxel has its own xorshift32 generator, so the whole world is deterministic and
   every run can be replayed bit for bit.
 
-One tick is about 50,000 NAND/STO instructions per voxel; two thirds of it are the gates' 64-way
+One tick is about 55,000 NAND/STO instructions per voxel; two thirds of it are the gates' 64-way
 input selects.
+
+## Bodies (step 11c)
+
+A cell can't be bigger than a voxel: a voxel is one machine, and every machine runs the same
+program on the same fixed memory. But an organism can be many voxels. Division already puts the
+same genome into the neighbouring voxel, and the signals let cells tell kin from strangers. What
+makes a cluster of related cells a body is sharing energy:
+
+- **Giving:** a free cell with gate 25 on offers an eighth of its energy (what it had at the start
+  of the tick) to the cell in its direction, if there is one. The receiver gets it this tick, as a
+  gain; the giver loses it. What does not fit under 255 is lost. Nothing is given to an empty
+  voxel.
+- **The tick, in order:** the gates run first, then every cell asks and offers, then the empty
+  voxels grant, all in one tick. In 11b the grants used the previous tick's request, so a cell that
+  saw a gap and turned to it was always a tick behind a cell that had pointed there blindly.
+
+Why this and not a cost for asking: the war for space is already there. What kept it from rewarding
+the senses was the order of the tick, and that nothing could be done with surplus energy. The world
+has light at the top and minerals at the floor with 24 empty layers between; a body that spans them
+is the first thing that can live there. And sharing creates something to cheat on.
 
 ## What it does so far
 
 From a soup of 10 % random cells the world fills the sunlit top layers and the mineral-rich floor;
 the twilight between them stays empty. Selection is visible at once: the share of free cells that
-ask to divide rises from about 26 % in the soup to about 94 %. But the winner is blind: a voxel
-freed by a death goes to whoever already points at it, before a cell could sense the vacancy and
-turn to it, and asking costs nothing. So the occupancy senses do not pay yet. Making asking cost
-energy, or energy scarcer, is the next lever.
+ask to divide rises from about 26 % in the soup to about 90 %.
+
+With the tick in the right order (11c) the common genomes read their senses: they turn towards a
+free neighbour, and give on conditions. But the habitable zone is full, so the only vacancies are
+the few deaths per tick, and the empty voxels a cell can see are the dark under the canopy, where
+a child starves. Space is the limit, not energy, which sits near the cap. An eighth of the cells
+give energy away and clonal bodies of up to 13 cells form, but no body feeds a cell in the dark
+yet. The numbers are in ROADMAP step 11c.
 
 ## Steps
 
@@ -97,6 +124,7 @@ energy, or energy scarcer, is the next lever.
 |---|---|---|
 | 11a | the world: 3-D torus, light and minerals, checked against plain C, timed | ✅ |
 | 11b | cells: genome, senses, division with mutation, energy, death; evolution from a random soup | ✅ |
-| 11c | `alpha gamma --serve`: a page that draws the cube live; click a cell to see its circuit | ⬜ |
-| 11d | the twin world across the 16th dimension: butterfly and control modes | ⬜ |
-| 11e | AVX-512 (5c), the world across the cluster (7g) | ⬜ |
+| 11c | bodies: energy given from cell to cell, and asking, granting and being born in one tick | ✅ |
+| 11d | `alpha gamma --serve`: a page that draws the cube live; click a cell to see its circuit | ⬜ |
+| 11e | the twin world across the 16th dimension: butterfly and control modes | ⬜ |
+| 11f | AVX-512 (5c), the world across the cluster (7g) | ⬜ |

@@ -12,7 +12,7 @@ A computer with a **1-bit opcode and two instructions**: `NAND` (RR = !(RR & cel
 - **A computer built out of NAND:** beta, an 8-bit machine with a monitor that loads and runs
   programs; 16,384 of them run at once.
 - **A world:** gamma, a 3-D torus of voxels with light and minerals, and cells in it that are
-  NAND circuits and evolve from a soup of random genomes.
+  NAND circuits, divide, feed each other and evolve from a soup of random genomes.
 - **A superoptimizer** that proves programs shortest: the library's full adder went from 28
   instructions to 19, and nothing shorter exists.
 

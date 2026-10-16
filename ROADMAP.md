@@ -22,12 +22,12 @@ a small LAN cluster of four Ubuntu machines; yours will differ.
 | 8 | Toward an operating system | 8a ✅ 8b ✅ 8c ⬜ | beta, a byte computer with a monitor: 16,384 of them, 1.3 × 10^9 instructions/s |
 | 9 | Real 1-bit hardware (FPGA) | ⬜ | |
 | 10 | Superoptimizer | ✅ | every library building block provably shortest; full adder 28 → 19, sort 2× faster |
-| 11 | Gamma: a world of cells on the cube | 11a ✅ 11b ✅ 11c–11e ⬜ | cells that are NAND circuits evolve from a random soup; 13,300 ticks/s for 32,768 voxels |
+| 11 | Gamma: a world of cells on the cube | 11a ✅ 11b ✅ 11c ✅ 11d–11f ⬜ | cells that are NAND circuits evolve from a random soup, divide and feed each other; ~10,000 ticks/s for 32,768 voxels |
 | – | ~~Control flow with lane masks~~ | parked | needs a new instruction (see the end) |
 
-**Open:** gamma's ecology (make the cells' senses pay) and 11c (a live view), 10 (optimize for
-the compiler's cost, not only the length), 7g (one cube across the cluster), 5c (AVX-512), 8c (more
-memory, networked betas), 9 (FPGA).
+**Open:** gamma's ecology (space is the limit, not energy: see 11c) and 11d (a live view), 10
+(optimize for the compiler's cost, not only the length), 7g (one cube across the cluster), 5c
+(AVX-512), 8c (more memory, networked betas), 9 (FPGA).
 
 ## 1. Reference machine ✅
 
@@ -930,11 +930,83 @@ The whole suite is 2,634 checks under gcc. Four injected bugs were all caught, w
 
 Next, the ecology: make the senses pay. Make asking cost energy, make energy scarcer, and later let cells eat or feed each other.
 
-### 11c–11e ⬜
+`alpha gamma --genes N` (added after 11b) prints the N most common genomes as circuits: every gate
+with its two sources by name, the gates that feed the actions marked, and which actions are
+constant whatever the senses say. The most common genomes after a million ticks hold only 10 to 12
+cells each, and all three read their senses; the "blind" asking of the census is a canopy cell
+whose light and energy bits never change.
 
-- 11c `alpha gamma --serve`: a live page of the cube; click a cell to see its circuit.
-- 11d the twin world across the 16th dimension: butterfly and control modes.
-- 11e AVX-512 (5c), the world across the cluster (7g).
+### 11c. Bodies: energy from cell to cell, and the tick in the right order ✅
+
+Two changes to the rules, decided against a cost for asking ([docs/GAMMA.md](docs/GAMMA.md)):
+
+- **Giving.** Gate 25 is a new action: a free cell with it on offers an eighth of its energy to the
+  cell in its direction (gates 29–31, shared with dividing), if there is one. The receiver gets it
+  in the same tick as a gain, the giver loses it; what does not fit under 255 is lost. In the
+  circuit the offer is 5 plain cells written after the brain and read over the links by the
+  neighbours, who add up what points at them (at most 6 × 31): 24 more link reads and two more
+  adders, about 1,100 instructions.
+- **The tick in the right order.** The gates run first, then every cell asks and offers, then the
+  empty voxels grant, then the rest: asking, being granted and the split all happen in the tick
+  the decision is made. In 11b the grants used the previous tick's request, so a cell that saw a
+  gap and turned to it was always a tick behind one that had pointed there blindly. The signals
+  the neighbours read are now registers (the gates as they ended the last tick), so the brain
+  can run whole in the first segment; the pass has 4 segments (one more barrier): 52,084
+  instructions.
+
+The bug the check caught: in the plain C, a dying cell's gates were cleared in place while
+later-indexed neighbours still read its direction to take its offer; the circuit reads them before
+the clearing. The two disagreed once in about 2,000 ticks per cell, which `test_gamma` found at
+tick 38 of a 512-voxel world and at tick 1 of a 65,536-voxel one. The clearing is a fourth pass
+now. (And the generator's energy sum had one bit less room than the adder makes.)
+
+The same world under both rules, seed 1, a million ticks, on the same machine in the same
+session (`alpha gamma --ticks 1000000`; the 11b binary kept for it):
+
+| at tick 1,000,000 | 11b | 11c |
+|---|---:|---:|
+| cells | 6,235 | 5,575 |
+| distinct genomes | 3,433 | 3,149 |
+| energy per cell | 206 | 207 |
+| free cells asking to divide | 94.1 % | 90.4 % |
+| asks that get a voxel | 0.1–0.2 % (asks at an empty voxel) | 0.0–0.1 % (granted) |
+| free cells giving energy | — | 12.8 %, rising from 7 % |
+| energy given, per tick | — | 13,900 (2.5 per cell) |
+| bodies of 2 or more cells with one genome / the largest | — | 1,318 / 9–13 |
+| cells in the 24 layers between canopy and floor | 0 | 0 |
+| ticks/s, 16 threads | 11,800 | 9,650 |
+
+What it says:
+- **The senses are used now.** All three most common genomes point by what they see: direction
+  bit 1 is NAND(cell at −y, cell at +y) in every one of them, so the cell turns along y when a
+  y-neighbour is free, and bit 0 reads whether −x is free. Giving is conditional too: "give unless
+  there is a cell at −x", "give when the light is dim".
+- **But space, not energy, is the limit, and the senses can't make space.** Energy sits at 207 of
+  255. The habitable zone is full; the only vacancies are the ~3 deaths per tick, for ~5,000 asks,
+  so at most 0.1 % of asks can ever succeed, sensing or not. The empty voxels a cell can see are
+  the dark layer under the canopy, where a child starves. Aiming well at them does not pay.
+- **Sharing happens at scale, bodies don't yet.** An eighth of the cells give, 2.5 energy per
+  cell per tick flows, and clonal bodies of up to 13 cells form, but nothing lives in the dark
+  middle: no body feeds a cell down there. Whether the gifts go to kin or to anyone is not
+  measured yet.
+- Fewer cells than under 11b (−11 %): gifts at the cap are lost, and a gift to a stranger is a
+  loss to the giver.
+
+Done: `test_gamma`, 49 checks: the 11b checks with the division timeline one tick shorter, and
+energy given from cell to cell by hand-written cells: an eighth of 80 is 10, a chain of three (the
+middle one takes 10 and gives 5 of its own), nothing to an empty voxel, the next tick's eighth, and
+a full cell that keeps 254. The whole suite is 2,638 checks under gcc. Four injected bugs were all
+caught, with 14–15 failures each: the gift not taken from the giver, a gift made to an empty voxel,
+the grant read from the wrong side, and plain C not capping the sum of gifts.
+
+Next: measure where the gifts go (kin or strangers), and give the dark a way to be worth it; a live
+view (11d) to watch it.
+
+### 11d–11f ⬜
+
+- 11d `alpha gamma --serve`: a live page of the cube; click a cell to see its circuit.
+- 11e the twin world across the 16th dimension: butterfly and control modes.
+- 11f AVX-512 (5c), the world across the cluster (7g).
 
 Details in [docs/GAMMA.md](docs/GAMMA.md).
 

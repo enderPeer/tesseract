@@ -286,9 +286,9 @@ Ideas, from a few minutes to a weekend:
   automaton on a ring of 512 machines; try other rules.
 - **512 different beta programs.** Give every beta a different number with `--lane-input` and print
   something that depends on it: primes below N, a countdown, a pattern.
-- **Change the world.** In gamma, make asking to divide cost energy: change `gamma_step()` and
-  `gen_gamma()` the same way (`test_gamma` tells you when they disagree) and see whether the cells
-  learn to use their senses.
+- **Change the world.** In gamma, let a cell give a quarter of its energy instead of an eighth, or
+  mutate twice as often: change `gamma_step()` and `gen_gamma()` the same way (`test_gamma` tells
+  you when they disagree), run a million ticks with `--genes 3`, and read what evolved.
 - **Measure your CPU.** `bin/alpha scale examples/adder8.asm` and `bin/alpha sweep
   examples/adder8.asm` show how your cores and caches compare; E-cores, hyper-threads and RAM all
   show up.
