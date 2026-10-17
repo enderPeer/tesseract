@@ -1,6 +1,7 @@
 /* Tests for gamma (step 11): the world in plain C against hand-worked cases (the fields under the
    sun wave, a hand-written cell that divides, the lot, terms, death, energy given from cell to
-   cell, midnight), the ledger on running soups, the voxels' places on the cube, and the world's
+   cell, midnight, the riddle and its credit, predators), the ledger on running soups, the
+   voxels' places on the cube, and the world's
    NAND/STO program on every engine against plain C, from random states of everything. Run from
    the project root. The expected values were worked out from the rules at the top of gamma.h,
    never from the code. */
@@ -71,7 +72,12 @@ static void random_world(GammaWorld *w, uint64_t *s)
         w->rng[v] = (uint32_t)rnd(s) | 1;
         for (int i = 0; i < GAMMA_GATES; i++)
             w->genome[GAMMA_GATES * v + i] = (uint16_t)(rnd(s) & ((1u << GAMMA_GATE_BITS) - 1));
+        w->token[v] = (uint8_t)(q >> 17 & 1);
+        w->credit[v] = (uint8_t)(q >> 18 & GAMMA_CREDIT_MAX);
+        w->pred[v] = (uint8_t)((q >> 22 & 3) == 0);
+        w->fresh[v] = (uint8_t)(q >> 24 & 1);
     }
+    w->need = (unsigned)(rnd(s) & GAMMA_CREDIT_MAX);
 }
 
 /* light after passing `n` empty voxels below the sun */
@@ -97,6 +103,7 @@ static void put_cell(GammaWorld *w, size_t v, const uint16_t *genome, unsigned e
     w->alive[v] = 1;
     w->busy[v] = w->embryo[v] = w->partner[v] = w->counter[v] = w->request[v] = w->born[v] = 0;
     w->offer[v] = 0;
+    w->credit[v] = 0;
     w->energy[v] = (uint8_t)energy;
     w->term[v] = (uint16_t)term;
     w->gates[v] = 0;
@@ -128,6 +135,47 @@ static void cell(uint16_t *genome, int dir, int divide, int give)
 static void plant(uint16_t *genome, int dir)
 {
     cell(genome, dir, 1, 0);
+}
+
+/* The social game's cells (step 11f). talker(): points in direction dir, says its token on signal
+   0 and answers its token XOR what the cell it points at says on signal 0 (sense 10 + 2 dir), in
+   four NANDs; with say 0 it says nothing (signal 0 is 0). guesser(): answers its own token,
+   says nothing. */
+static void talker(uint16_t *genome, int dir, int say)
+{
+    int heard = 10 + 2 * dir;
+    cell(genome, dir, 0, 0);
+    genome[1] = gate_of(2, 2);                   /* g1 = !token */
+    genome[2] = gate_of(2, heard);               /* g2 = NAND(token, heard) */
+    genome[3] = gate_of(2, 34);                  /* NAND(token, g2) */
+    genome[4] = gate_of(heard, 34);              /* NAND(heard, g2) */
+    genome[GAMMA_ANSWER] = gate_of(35, 36);      /* token XOR heard */
+    if (say)
+        genome[GAMMA_SIGNAL] = gate_of(33, 33);  /* signal 0 = token */
+}
+
+static void guesser(uint16_t *genome, int dir)
+{
+    cell(genome, dir, 0, 0);
+    genome[1] = gate_of(2, 2);
+    genome[GAMMA_ANSWER] = gate_of(33, 33);  /* the answer is the cell's own token */
+}
+
+static unsigned up(unsigned credit, unsigned solved)  /* + 1 for a round solved, at most 15 */
+{
+    return credit + solved > GAMMA_CREDIT_MAX ? GAMMA_CREDIT_MAX : credit + solved;
+}
+
+/* a dice state whose next draws (xorshift32 `ahead` times) have bits 27 and 28 as asked */
+static uint32_t dice_for(uint32_t from, int ahead, unsigned strike)
+{
+    for (uint32_t r = from;; r++) {
+        uint32_t x = r ? r : 1;
+        for (int i = 0; i < ahead; i++)
+            x = xorshift32(x);
+        if ((x >> GAMMA_STRIKE_DICE & 3) == strike && r)
+            return r;
+    }
 }
 
 /* ---- the fields --------------------------------------------------------------------------- */
@@ -469,6 +517,235 @@ static void test_sharing(void)
     gamma_world_free(&m);
 }
 
+/* ---- the social game (step 11f) ---------------------------------------------------------- */
+
+/* the riddle and a day of credit, on the sun plane of an 8 x 8 x 8 world (light, so nobody
+   starves): two talkers that point at each other solve every round; two guessers that answer
+   their own token solve a round when the other's token is 0; a cell alone never answers. The
+   need is 12: at midnight the talkers live, the lonely cell dies, the guessers as their count
+   says */
+static void test_riddle(void)
+{
+    GammaWorld w;
+    gamma_world_init(&w, 3, 3, 3);
+    for (size_t v = 0; v < w.n; v++)
+        w.rng[v] = (uint32_t)(v * 2654435761u) | 1;
+    w.need = 12;
+    uint16_t ta[GAMMA_GATES], tb[GAMMA_GATES], ga[GAMMA_GATES], gb[GAMMA_GATES], lo[GAMMA_GATES];
+    talker(ta, 0, 1);
+    talker(tb, 1, 1);
+    guesser(ga, 0);
+    guesser(gb, 1);
+    talker(lo, 0, 1);
+    size_t a = gamma_voxel(&w, 1, 1, 0), b = gamma_voxel(&w, 2, 1, 0), c = gamma_voxel(&w, 5, 5, 0),
+           d = gamma_voxel(&w, 6, 5, 0), l = gamma_voxel(&w, 1, 5, 0);
+    put_cell(&w, a, ta, 200, w.rng[a], TERM_MAX);
+    put_cell(&w, b, tb, 200, w.rng[b], TERM_MAX);
+    put_cell(&w, c, ga, 200, w.rng[c], TERM_MAX);
+    put_cell(&w, d, gb, 200, w.rng[d], TERM_MAX);
+    put_cell(&w, l, lo, 200, w.rng[l], TERM_MAX);
+    int rounds = 0, talk = 0, bad = 0, nc = 0, nd = 0;
+    unsigned tokens = 0;
+    uint64_t answered = 0, solved = 0;
+    for (int t = 0; t < 255; t++) {  /* the clock 1 .. 255: the 16 rounds of the day */
+        unsigned judge = ((w.clock[0] + 1u) & 15) == 15, tc = w.token[c], td = w.token[d];
+        unsigned cr[5] = {w.credit[a], w.credit[b], w.credit[c], w.credit[d], w.credit[l]};
+        unsigned tok = w.token[a];
+        tokens |= 1u << tok;
+        gamma_step(&w);
+        answered += w.ledger.answered;
+        solved += w.ledger.solved;
+        if (judge) {
+            rounds++;
+            nc += td == 0;  /* c answers its own token, and must say tc ^ td */
+            nd += tc == 0;
+            talk += w.credit[a] == up(cr[0], 1) && w.credit[b] == up(cr[1], 1);
+            bad += w.credit[c] != up(cr[2], td == 0) || w.credit[d] != up(cr[3], tc == 0) ||
+                   w.credit[l] != 0;
+            bad += w.token[a] != (w.rng[a] >> GAMMA_TOKEN_DICE & 1);  /* the next round's */
+        } else {
+            bad += w.credit[a] != cr[0] || w.credit[c] != cr[2] || w.token[a] != tok;
+        }
+    }
+    int all = w.alive[a] && w.alive[b] && w.alive[c] && w.alive[d] && w.alive[l];
+    CHECK(rounds == 16 && talk == 16 && bad == 0 && all && w.clock[0] == 255 &&
+              w.credit[a] == GAMMA_CREDIT_MAX && tokens == 3,
+          "the 16 rounds of a day: the talkers solve every one (%d), at most 15 credit (%u); the "
+          "guessers' credit follows the other's token, the lone cell has none, the token changes "
+          "only at a round's end, to bit 24 of the dice (%d wrong); tokens both ways (%u)", talk,
+          w.credit[a], bad, tokens);
+    CHECK(answered == 4 * 16 && solved == 2 * 16 + (uint64_t)(nc + nd),
+          "the ledger: 64 answers (4 cells, 16 rounds; the lone cell points at nobody) (%llu), "
+          "solved 32 + %d + %d (%llu)", (unsigned long long)answered, nc, nd,
+          (unsigned long long)solved);
+    gamma_step(&w);  /* midnight */
+    CHECK(w.clock[0] == 0 && w.alive[a] && w.alive[b] && w.credit[a] == 0 && w.credit[b] == 0 &&
+              !w.alive[l] && w.alive[c] == (nc >= 12) && w.alive[d] == (nd >= 12) &&
+              w.ledger.lonely == 1u + (nc < 12) + (nd < 12),
+          "midnight with need 12: the talkers live and start again at 0, the lone cell dies of "
+          "loneliness, the guessers with %d and %d rounds %s and %s (lonely %llu)", nc, nd,
+          nc >= 12 ? "live" : "die", nd >= 12 ? "live" : "die",
+          (unsigned long long)w.ledger.lonely);
+    gamma_world_free(&w);
+
+    /* a new cell's credit is the rounds of the day past: granted with the clock at 201, 12; a
+       round that ends while a cell divides counts, for the parent and the new cell alike (the
+       clock at 207) */
+    GammaWorld s;
+    gamma_world_init(&s, 3, 3, 3);
+    for (size_t v = 0; v < s.n; v++) {
+        s.rng[v] = 7;
+        s.clock[v] = 200;
+    }
+    uint16_t pl[GAMMA_GATES];
+    plant(pl, 5);
+    size_t pv = gamma_voxel(&s, 4, 4, 4), nv = gamma_voxel(&s, 4, 4, 3);
+    put_cell(&s, pv, pl, 100, 7, TERM_MAX);
+    s.credit[pv] = 3;
+    gamma_step(&s);
+    int born12 = s.alive[nv] && s.busy[nv] && s.credit[nv] == 12 && s.credit[pv] == 3 &&
+                 s.credit[gamma_voxel(&s, 0, 0, 0)] == 0;
+    for (int t = 0; t < 6; t++)
+        gamma_step(&s);  /* the clock to 207: a round ends */
+    CHECK(born12 && s.clock[0] == 207 && s.busy[pv] && s.credit[nv] == 13 && s.credit[pv] == 4 &&
+              s.ledger.solved == 0,
+          "a new cell granted at clock 201 starts with the 12 rounds past (%u); at the round's end "
+          "both, dividing, are counted a round (%u, %u) that nobody solved", s.credit[nv] - 1,
+          s.credit[nv], s.credit[pv]);
+    gamma_world_free(&s);
+}
+
+/* predators: they swap within pairs and are never made or lost; they strike after their first
+   tick, 1 in 4, unless the cell hides; the cells next to them see them, and an alarm saves a cell
+   that listens */
+static void test_predators(void)
+{
+    GammaWorld w;
+    gamma_world_init(&w, 3, 2, 3);  /* 8 x 4 x 8, no cells */
+    uint64_t s = 99;
+    for (size_t v = 0; v < w.n; v++)
+        w.rng[v] = (uint32_t)rnd(&s) | 1;
+    size_t placed = gamma_predators(&w, 40, 3);
+    uint8_t *before = malloc(w.n);
+    int lost = 0, still = 0, far = 0, fresh = 0, moved = 0;
+    for (int t = 0; t < 300; t++) {
+        memcpy(before, w.pred, w.n);
+        unsigned phase = (w.clock[0] + 1u) & 7;
+        gamma_step(&w);
+        size_t n = 0;
+        for (size_t v = 0; v < w.n; v++) {
+            n += w.pred[v];
+            fresh += w.fresh[v] != (w.pred[v] & !before[v]);
+            moved += w.pred[v] != before[v];
+            if (phase >= 6)
+                still += w.pred[v] != before[v];
+            else if (w.pred[v] && !before[v]) {  /* it came from the pair's other voxel */
+                unsigned ax = phase >> 1, x = (unsigned)v & 7, y = (unsigned)(v >> 3) & 3,
+                         z = (unsigned)(v >> 5), c = ax == 0 ? x : ax == 1 ? y : z;
+                int lower = (c & 1) == (phase & 1);
+                far += !before[gamma_neighbour(&w, v, lower ? 2 * (int)ax : 2 * (int)ax + 1)];
+            }
+        }
+        lost += n != placed;
+    }
+    CHECK(placed == 40 && lost == 0 && still == 0 && far == 0 && fresh == 0 && moved > 300,
+          "40 predators for 300 ticks: never one more or less (%d), none moves when the clock's "
+          "low bits are 6 or 7 (%d), each comes from its pair (%d), fresh = came this tick (%d), "
+          "%d moves", lost, still, far, fresh, moved);
+    free(before);
+
+    /* the swap by hand: the clock's low bits 0 (axis x, pairs 2-3, 4-5, ..), one predator at x 2,
+       so the lower voxel's dice decide; at x 3 the voxel at x 2 decides as well */
+    memset(w.pred, 0, w.n);
+    memset(w.clock, 7, w.n);
+    size_t p2 = gamma_voxel(&w, 2, 1, 1), p3 = gamma_voxel(&w, 3, 1, 1), q5 = gamma_voxel(&w, 5, 1, 1),
+           q4 = gamma_voxel(&w, 4, 1, 1);
+    w.pred[p2] = 1;
+    w.pred[q5] = 1;
+    unsigned sw2 = xorshift32(w.rng[p2]) >> GAMMA_SWAP_DICE & 1,
+             sw4 = xorshift32(w.rng[q4]) >> GAMMA_SWAP_DICE & 1;
+    gamma_step(&w);
+    CHECK(w.pred[p3] == sw2 && w.pred[p2] == !sw2 && w.fresh[p3] == sw2 && w.pred[q4] == sw4 &&
+              w.pred[q5] == !sw4,
+          "with the clock at 0 the pair x 2-3 swaps on x 2's dice (%u) and the pair 4-5 on x 4's "
+          "(%u): a predator at x 5 goes down to 4 by the lower voxel's dice", sw2, sw4);
+    gamma_world_free(&w);
+
+    /* the strike: the clock's low bits 6 and 7 next (nobody moves), a predator in the voxel of
+       an idle cell, of a hiding one, and a fresh one with an idle cell, all with dice that strike;
+       the idle cell dies, the hiding one lives without light, the fresh predator waits */
+    GammaWorld k;
+    gamma_world_init(&k, 3, 3, 3);
+    uint16_t idle[GAMMA_GATES], hider[GAMMA_GATES];
+    cell(idle, 6, 0, 0);
+    cell(hider, 6, 0, 0);
+    hider[GAMMA_HIDE] = gate_of(32, 32);
+    for (size_t v = 0; v < k.n; v++) {
+        k.rng[v] = 7;
+        k.clock[v] = 5;
+        k.light[v] = 160;  /* 5 a tick, for a cell that does not hide */
+    }
+    size_t vi = gamma_voxel(&k, 1, 1, 4), vh = gamma_voxel(&k, 4, 1, 4), vf = gamma_voxel(&k, 6, 6, 4);
+    uint32_t hit = dice_for(1000, 1, 3);
+    put_cell(&k, vi, idle, 100, hit, TERM_MAX);
+    put_cell(&k, vh, hider, 100, hit, TERM_MAX);
+    put_cell(&k, vf, idle, 100, hit, TERM_MAX);
+    k.rng[vi] = k.rng[vh] = k.rng[vf] = hit;
+    k.pred[vi] = k.pred[vh] = k.pred[vf] = 1;
+    k.fresh[vf] = 1;
+    unsigned lit = k.light[vh] >> 5;
+    gamma_step(&k);
+    CHECK(!k.alive[vi] && k.mineral[vi] >= GAMMA_RELEASE && k.alive[vh] && k.energy[vh] == 99 &&
+              k.alive[vf] && k.energy[vf] == 100 + lit - 1 && k.pred[vi] && k.pred[vh] &&
+              k.ledger.killed == 1 && k.ledger.hidden == 1 && k.ledger.strikes == 2,
+          "a predator strikes (dice %08x): the idle cell dies, the hiding one lives on 99 (no light "
+          "while hiding), the fresh predator does not strike (%u); killed %llu, hidden %llu, "
+          "strikes %llu", xorshift32(hit), k.energy[vf], (unsigned long long)k.ledger.killed,
+          (unsigned long long)k.ledger.hidden, (unsigned long long)k.ledger.strikes);
+    gamma_world_free(&k);
+
+    /* sight and the alarm: a fresh predator comes into the voxel of a listener, which hides when
+       the cell at its -x says so on signal 0; the watcher there says what it sees (sense 27, a
+       predator next to it). Tick 1: the predator is fresh, the watcher sees it, the listener,
+       which does not see it in its own voxel, hides not; tick 2: the listener hears it and hides,
+       and the strike misses. The same without the watcher: the listener dies. */
+    for (int with = 0; with < 2; with++) {
+        GammaWorld a;
+        gamma_world_init(&a, 3, 3, 3);
+        uint16_t watcher[GAMMA_GATES], listener[GAMMA_GATES];
+        cell(watcher, 6, 0, 0);
+        watcher[1] = gate_of(27, 27);                    /* !seen */
+        watcher[GAMMA_SIGNAL] = gate_of(33, 33);         /* signal 0 = seen */
+        cell(listener, 6, 0, 0);
+        listener[1] = gate_of(12, 12);                   /* !(signal 0 of the cell at -x) */
+        listener[GAMMA_HIDE] = gate_of(33, 33);
+        for (size_t v = 0; v < a.n; v++) {
+            a.rng[v] = 7;
+            a.clock[v] = 5;
+        }
+        size_t lv = gamma_voxel(&a, 4, 4, 4), wv = gamma_voxel(&a, 3, 4, 4);
+        put_cell(&a, lv, listener, 100, dice_for(2000, 2, 3), TERM_MAX);
+        if (with)
+            put_cell(&a, wv, watcher, 100, 7, TERM_MAX);
+        uint32_t r1 = xorshift32(a.rng[lv]);
+        a.pred[lv] = 1;
+        a.fresh[lv] = 1;
+        gamma_step(&a);
+        int t1 = a.alive[lv] && (!with || (a.gates[wv] >> GAMMA_SIGNAL & 1)) &&
+                 !(a.gates[lv] >> GAMMA_HIDE & 1) && !a.fresh[lv] && a.pred[lv];
+        gamma_step(&a);
+        if (with)
+            CHECK(t1 && a.alive[lv] && (a.gates[lv] >> GAMMA_HIDE & 1) && a.ledger.strikes == 1 &&
+                      a.ledger.killed == 0,
+                  "a watcher next to the voxel sees the fresh predator and says so; the next tick "
+                  "the cell there hides and the strike (dice %08x) misses", xorshift32(r1));
+        else
+            CHECK(t1 && !a.alive[lv] && a.ledger.killed == 1,
+                  "without the watcher the same cell hears nothing and is killed");
+        gamma_world_free(&a);
+    }
+}
+
 /* a soup of random genomes gets going by itself: cells divide and some finish being born */
 static void test_soup(void)
 {
@@ -480,9 +757,10 @@ static void test_soup(void)
     int bad = 0;
     for (size_t v = 0; v < w.n; v++)
         bad += w.clock[v] != GAMMA_SUNRISE ||
-               (w.alive[v] ? w.term[v] < 1 || w.term[v] > TERM_MAX : w.term[v] != 0);
-    CHECK(bad == 0, "the soup goes in at sunrise, every cell with a term of 1 .. 511 and every "
-          "empty voxel with 0 (%d wrong)", bad);
+               (w.alive[v] ? w.term[v] < 1 || w.term[v] > TERM_MAX : w.term[v] != 0) ||
+               w.credit[v] != (w.alive[v] ? GAMMA_SUNRISE >> GAMMA_ROUND_BITS : 0);
+    CHECK(bad == 0, "the soup goes in at sunrise, every cell with a term of 1 .. 511 and a credit "
+          "of 4 (the rounds before sunrise), every empty voxel with 0 and 0 (%d wrong)", bad);
     for (int t = 0; t < 400; t++) {
         gamma_step(&w);
         size_t alive = 0;
@@ -500,13 +778,16 @@ static void test_soup(void)
 /* the ledger on a running soup, after every tick: its sums against the arrays, the two
    identities (as gamma_ledger_closes says and as summed here), received = given, no living cell
    past 511 and no empty voxel with a term, one clock in every voxel */
-static void test_ledger(int xb, int yb, int zb, int ticks, uint64_t seed)
+static void test_ledger(int xb, int yb, int zb, int ticks, uint64_t seed, unsigned need,
+                        size_t predators)
 {
     GammaWorld w;
     gamma_world_init(&w, xb, yb, zb);
     for (int t = 0; t < 300; t++)  /* the fields first */
         gamma_step(&w);
     size_t seeded = gamma_soup(&w, 0.3, 64, seed);
+    gamma_predators(&w, predators, seed);
+    w.need = need;
     GammaLedger sum = {0};
     int sums = 0, closes = 0, identities = 0, gifts = 0, terms = 0, clocks = 0;
     for (int t = 0; t < ticks; t++) {
@@ -536,7 +817,8 @@ static void test_ledger(int xb, int yb, int zb, int ticks, uint64_t seed)
                           (int64_t)(l->light + l->minerals) -
                               (int64_t)(l->cap + l->upkeep + l->rot + l->death) ||
                       (int64_t)(cells2 - cells) !=
-                          (int64_t)l->granted - (int64_t)(l->term + l->starved + l->aborted);
+                          (int64_t)l->granted - (int64_t)(l->term + l->starved + l->killed +
+                                                          l->lonely + l->aborted);
         gifts += l->received != l->given;
         gamma_ledger_add(&sum, l);
     }
@@ -548,12 +830,15 @@ static void test_ledger(int xb, int yb, int zb, int ticks, uint64_t seed)
     CHECK(terms == 0 && clocks == 0, "%u x %u x %u, %d ticks: no living cell past 511 and no empty "
           "voxel with a term (%d), the clock the same everywhere and counting (%d)", 1u << xb,
           1u << yb, 1u << zb, ticks, terms, clocks);
-    CHECK(gamma_ledger_closes(&sum) && sum.granted > 0 && sum.term > 0 && sum.rot > 0,
-          "%u x %u x %u, %d ticks: the ledgers added up close too, with births, deaths by term and "
-          "midnights that took something: %llu granted, %llu died of their term, %llu starved, %llu "
-          "aborted, %llu rotted at midnight, %llu given", 1u << xb,
-          1u << yb, 1u << zb, ticks, (unsigned long long)sum.granted, (unsigned long long)sum.term,
-          (unsigned long long)sum.starved, (unsigned long long)sum.aborted,
+    CHECK(gamma_ledger_closes(&sum) && sum.granted > 0 && sum.term > 0 && sum.rot > 0 &&
+              (!need || sum.lonely > 0) && (!predators || sum.killed > 0),
+          "%u x %u x %u, %d ticks, need %u, %zu predators: the ledgers added up close too, with "
+          "births, deaths by term and midnights that took something: %llu granted, %llu died of "
+          "their term, %llu starved, %llu killed, %llu lonely, %llu aborted, %llu rotted at "
+          "midnight, %llu given", 1u << xb, 1u << yb, 1u << zb, ticks, need, predators,
+          (unsigned long long)sum.granted, (unsigned long long)sum.term,
+          (unsigned long long)sum.starved, (unsigned long long)sum.killed,
+          (unsigned long long)sum.lonely, (unsigned long long)sum.aborted,
           (unsigned long long)sum.rot, (unsigned long long)sum.given);
     gamma_world_free(&w);
 }
@@ -625,9 +910,19 @@ static void on_reference(int xb, int yb, int zb, int ticks, uint64_t *s)
         cp.term[5] ^= 1;
         cp.clock[6] ^= 1;
         long c_at = gamma_compare(&want, &cp, &w2);
-        CHECK(t_at == 5 && c_at == 6 && !strcmp(w1, "term") && !strcmp(w2, "clock"),
-              "gamma_compare sees a term and a clock that differ (%ld %s, %ld %s)", t_at, w1, c_at,
-              w2);
+        cp.clock[6] ^= 1;
+        static const char *const part[4] = {"token", "credit", "predator", "fresh"};
+        int seen = 0;
+        for (int i = 0; i < 4; i++) {
+            uint8_t *f = i == 0 ? cp.token : i == 1 ? cp.credit : i == 2 ? cp.pred : cp.fresh;
+            const char *w3;
+            f[7] ^= 1;
+            seen += gamma_compare(&want, &cp, &w3) == 7 && !strcmp(w3, part[i]);
+            f[7] ^= 1;
+        }
+        CHECK(t_at == 5 && c_at == 6 && !strcmp(w1, "term") && !strcmp(w2, "clock") && seen == 4,
+              "gamma_compare sees a term, a clock, a token, a credit, a predator and a fresh one "
+              "that differ (%ld %s, %ld %s, %d of 4)", t_at, w1, c_at, w2, seen);
         gamma_world_free(&cp);
     }
     gamma_to_cube(&lc, &c, &want);
@@ -688,8 +983,9 @@ static void on_engines(int xb, int yb, int zb, uint64_t seed)
     program_free(&p);
 }
 
-enum { FROM_RANDOM, FROM_SOUP, FROM_SHORT_TERMS };  /* what compiled() starts from */
-static const char *const from_names[] = {"random", "a soup at clock 200", "random with terms 0 .. 3"};
+enum { FROM_RANDOM, FROM_SOUP, FROM_SHORT_TERMS, FROM_GAME };  /* what compiled() starts from */
+static const char *const from_names[] = {"random", "a soup at clock 200", "random with terms 0 .. 3",
+                                         "a soup at clock 200 with predators and need 8"};
 
 /* compiled code on one thread, or `threads` threads in lockstep, against plain C, tick by tick,
    from a random world, from a soup with midnight 56 ticks away, or from a random world whose every
@@ -709,11 +1005,15 @@ static void compiled(int xb, int yb, int zb, int ticks, int threads, int from, u
     }
     gamma_world_init(&want, xb, yb, zb);
     gamma_world_init(&got, xb, yb, zb);
-    if (from == FROM_SOUP) {
+    if (from == FROM_SOUP || from == FROM_GAME) {
         for (int t = 0; t < 1 << zb && t < 64; t++)
             gamma_step(&want);
         gamma_soup(&want, 0.25, 80, rnd(s));
         memset(want.clock, 200, want.n);
+        if (from == FROM_GAME) {
+            gamma_predators(&want, want.n / 16, rnd(s));
+            want.need = 8;
+        }
     } else {
         random_world(&want, s);
         if (from == FROM_SHORT_TERMS)
@@ -749,9 +1049,12 @@ int main(void)
     test_fields();
     test_division();
     test_sharing();
+    test_riddle();
+    test_predators();
     test_soup();
-    test_ledger(3, 3, 3, 600, 5);
-    test_ledger(4, 4, 4, 300, 6);
+    test_ledger(3, 3, 3, 600, 5, 0, 0);
+    test_ledger(4, 4, 4, 300, 6, 0, 0);
+    test_ledger(4, 4, 4, 600, 7, 6, 64);
     test_places();
     on_reference(3, 3, 3, 2, &s);
     on_reference(2, 3, 5, 2, &s);
@@ -767,7 +1070,8 @@ int main(void)
         {3, 3, 3, 40, 1, 0},  {3, 3, 3, 300, 1, 1}, {3, 3, 3, 40, 1, 2}, {2, 3, 5, 40, 1, 0},
         {2, 3, 5, 300, 1, 1}, {5, 5, 5, 12, 1, 0},  {5, 5, 5, 60, 1, 1}, {6, 5, 5, 6, 1, 0},
         {1, 1, 9, 30, 1, 0},  {9, 6, 1, 6, 1, 0},   {4, 8, 2, 10, 1, 0}, {5, 5, 5, 40, 5, 1},
-        {2, 3, 5, 60, 3, 0},  {2, 3, 5, 20, 3, 2},
+        {2, 3, 5, 60, 3, 0},  {2, 3, 5, 20, 3, 2},  {3, 3, 3, 300, 1, 3}, {5, 5, 5, 80, 1, 3},
+        {2, 3, 5, 300, 3, 3},
     };
     for (size_t i = 0; i < sizeof shape / sizeof shape[0]; i++)
         compiled(shape[i][0], shape[i][1], shape[i][2], shape[i][3], shape[i][4], shape[i][5], &s);

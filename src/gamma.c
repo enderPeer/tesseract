@@ -9,7 +9,7 @@
 
 const char *const gamma_part_names[GAMMA_PARTS] = {
     "where am I", "clock", "dice", "neighbour reads", "gates (the brain)", "asking and offering",
-    "grants", "partner reads", "energy and state", "genome copy", "light", "minerals", "registers"};
+    "grants", "partner reads", "energy and state", "genome copy", "light", "minerals", "the game", "registers"};
 
 /* ---- the world in plain C ----------------------------------------------------------------- */
 
@@ -32,9 +32,13 @@ static int arrays(GammaWorld *w)
     w->rng = calloc(n, sizeof *w->rng);
     w->light = calloc(n, 1);
     w->mineral = calloc(n, sizeof *w->mineral);
+    w->token = calloc(n, 1);
+    w->credit = calloc(n, 1);
+    w->pred = calloc(n, 1);
+    w->fresh = calloc(n, 1);
     return w->alive && w->busy && w->embryo && w->partner && w->counter && w->energy &&
            w->request && w->offer && w->born && w->clock && w->term && w->genome && w->gates &&
-           w->rng && w->light && w->mineral;
+           w->rng && w->light && w->mineral && w->token && w->credit && w->pred && w->fresh;
 }
 
 static void free_arrays(GammaWorld *w)
@@ -55,6 +59,10 @@ static void free_arrays(GammaWorld *w)
     free(w->rng);
     free(w->light);
     free(w->mineral);
+    free(w->token);
+    free(w->credit);
+    free(w->pred);
+    free(w->fresh);
 }
 
 int gamma_world_init(GammaWorld *w, int xbits, int ybits, int zbits)
@@ -108,6 +116,11 @@ void gamma_world_copy(GammaWorld *dst, const GammaWorld *src)
     memcpy(dst->rng, src->rng, n * sizeof *dst->rng);
     memcpy(dst->light, src->light, n);
     memcpy(dst->mineral, src->mineral, n * sizeof *dst->mineral);
+    memcpy(dst->token, src->token, n);
+    memcpy(dst->credit, src->credit, n);
+    memcpy(dst->pred, src->pred, n);
+    memcpy(dst->fresh, src->fresh, n);
+    dst->need = src->need;
 }
 
 static void swap_state(GammaWorld *a, GammaWorld *b)
@@ -134,6 +147,10 @@ static void swap_state(GammaWorld *a, GammaWorld *b)
     SWAP(rng);
     SWAP(light);
     SWAP(mineral);
+    SWAP(token);
+    SWAP(credit);
+    SWAP(pred);
+    SWAP(fresh);
 #undef SWAP
 }
 
@@ -181,7 +198,8 @@ void gamma_step(GammaWorld *w)
 {
     GammaWorld *o = w->spare;
     GammaLedger *L = &w->ledger;
-    unsigned Z = 1u << w->zbits, zshift = (unsigned)(w->xbits + w->ybits);
+    unsigned X = 1u << w->xbits, Y = 1u << w->ybits, Z = 1u << w->zbits,
+             zshift = (unsigned)(w->xbits + w->ybits);
     const uint16_t *m = w->mineral;
     memset(L, 0, sizeof *L);
 
@@ -189,19 +207,27 @@ void gamma_step(GammaWorld *w)
        offers this tick (into the next state, for the other voxels to read in passes 2 and 3). */
     for (size_t v = 0; v < w->n; v++) {
         unsigned E = w->energy[v], active = w->alive[v] & !w->busy[v];
-        uint32_t r = xorshift32(w->rng[v]), s = 1u | (r & 7u) << 1, g = w->gates[v];
+        unsigned clock = (w->clock[v] + 1u) & 255, judge = (clock & 15) == 15;
+        uint32_t r = xorshift32(w->rng[v]), g = w->gates[v];
+        uint32_t s = 1u | (r & 1u) << 1 | (uint32_t)w->token[v] << 2 | (uint32_t)judge << 3;
         size_t nb[6];
-        o->clock[v] = (uint8_t)(w->clock[v] + 1);
+        o->clock[v] = (uint8_t)clock;
         for (int d = 0; d < 6; d++) {
             nb[d] = gamma_neighbour(w, v, d);
             s |= (uint32_t)w->alive[nb[d]] << (4 + d);
             s |= (w->gates[nb[d]] >> GAMMA_SIGNAL & 3u) << (10 + 2 * d);
         }
-        for (int j = 0; j < 3; j++) {
+        for (int j = 0; j < 3; j++)
             s |= (uint32_t)(E >> (7 - j) & 1) << (22 + j);
+        for (int j = 0; j < 2; j++) {
             s |= (uint32_t)(w->light[v] >> (7 - j) & 1) << (25 + j);
             s |= (uint32_t)(m[v] >> (11 - j) & 1) << (28 + j);
         }
+        unsigned seen = 0;  /* a predator in a neighbouring voxel */
+        for (int d = 0; d < 6; d++)
+            seen |= w->pred[nb[d]];
+        s |= (uint32_t)seen << 27;
+        s |= (uint32_t)(w->credit[v] < w->need) << 30;
         s |= (uint32_t)w->born[v] << 31;
         if (active) {  /* in order, in place: a later gate is read as it was last tick */
             const uint16_t *gen = w->genome + GAMMA_GATES * v;
@@ -238,10 +264,12 @@ void gamma_step(GammaWorld *w)
         size_t nb[6];
         for (int d = 0; d < 6; d++)
             nb[d] = gamma_neighbour(w, v, d);
+        unsigned x = (unsigned)v & (X - 1), y = (unsigned)(v >> w->xbits) & (Y - 1);
         unsigned z = (unsigned)(v >> zshift), E = w->energy[v], A = w->alive[v], B = w->busy[v];
         unsigned active = A & !B, busy = A & B, emb = busy & w->embryo[v];
-        unsigned clock = o->clock[v], midnight = clock == 0;
+        unsigned clock = o->clock[v], midnight = clock == 0, judge = (clock & 15) == 15;
         uint32_t r = o->rng[v], g = o->gates[v];
+        unsigned hidden = active & (g >> GAMMA_HIDE & 1);
 
         /* division: did this cell's request go through, did this voxel grant one */
         unsigned D = dir_of(g);
@@ -268,17 +296,21 @@ void gamma_step(GammaWorld *w)
             if (dir_of(o->gates[nb[d]]) == (unsigned)(d ^ 1))
                 recv += o->offer[nb[d]];
 
-        /* energy: gains, upkeep, the split and the gift (never below 0: the gift is an eighth of
-           what the cell had, the split half, and nothing is taken before upkeep is paid), death
-           by starving, by the term being up, or with the parent; at midnight the manna: a cell
+        /* energy: gains (none from light and minerals while hiding), upkeep, the split and the
+           gift (never below 0: the gift is an eighth of what the cell had, the split half, and
+           nothing is taken before upkeep is paid), death by starving, by the term being up, by a
+           predator, of loneliness at midnight, or with the parent; at midnight the manna: a cell
            keeps at most 127 of what it ends the tick with */
-        unsigned gain = (w->light[v] >> 5) + (m[v] >> 9u) + recv;
+        unsigned food = hidden ? 0 : (w->light[v] >> 5) + (m[v] >> 9u), gain = food + recv;
         unsigned e1 = E + gain > GAMMA_ENERGY_MAX ? GAMMA_ENERGY_MAX : E + gain;
         unsigned starve = e1 == 0, e2 = starve ? 0 : e1 - 1;
         unsigned parent = active & granted, e3 = (parent ? e2 - (E >> 1) : e2) - o->offer[v];
         unsigned termup = w->term[v] == 0;
         unsigned abort = emb & !(pA & pB & !pK);
-        unsigned die = (A & (starve | termup)) | abort, live = A & !die;
+        unsigned strike = w->pred[v] & !w->fresh[v] & ((r >> GAMMA_STRIKE_DICE & 3) == 3);
+        unsigned killed = A & strike & !hidden;
+        unsigned lonely = A & midnight & (w->credit[v] < w->need);
+        unsigned die = (A & (starve | termup | killed | lonely)) | abort, live = A & !die;
         unsigned finish = busy & (w->counter[v] == GAMMA_GATES - 1);
         unsigned en = newborn ? pE >> 1 : live ? e3 : 0;
         unsigned rot = midnight && en > GAMMA_OMER ? en - GAMMA_OMER : 0;
@@ -293,6 +325,32 @@ void gamma_step(GammaWorld *w)
         o->born[v] = (uint8_t)(emb & finish & !die);
         o->term[v] = (uint16_t)(newborn ? term : live ? w->term[v] - 1u : 0);
 
+        /* the riddle: in a round's last tick, the answer against the two tokens; the credit; the
+           next round's token */
+        unsigned answered = active & judge & (D < 6) && w->alive[nb[D < 6 ? D : 0]];
+        unsigned want = (unsigned)(w->token[v] ^ w->token[nb[D < 6 ? D : 0]]);
+        unsigned solved = answered && (g >> GAMMA_ANSWER & 1) == want;
+        unsigned excused = busy & judge;  /* dividing when the round ends: it counts */
+        unsigned credit = w->credit[v] + (solved | excused);
+        if (credit > GAMMA_CREDIT_MAX)
+            credit = GAMMA_CREDIT_MAX;
+        o->credit[v] = (uint8_t)(newborn  ? clock >> GAMMA_ROUND_BITS
+                                 : live && !midnight ? credit
+                                                     : 0);
+        o->token[v] = (uint8_t)(judge ? r >> GAMMA_TOKEN_DICE & 1 : w->token[v]);
+
+        /* the predators: with the clock's low 3 bits 2a + p (a < 3) the pairs along axis a whose
+           lower voxel has coordinate c mod 2 = p swap if that voxel's dice say so */
+        unsigned phase = clock & 7, ax = phase >> 1, pn = w->pred[v];
+        if (ax < 3) {
+            unsigned coord = ax == 0 ? x : ax == 1 ? y : z, lower = (coord & 1) == (phase & 1);
+            size_t u = nb[lower ? 2 * ax : 2 * ax + 1], lo = lower ? v : u;
+            if (o->rng[lo] >> GAMMA_SWAP_DICE & 1)
+                pn = w->pred[u];
+        }
+        o->pred[v] = (uint8_t)pn;
+        o->fresh[v] = (uint8_t)(pn & !w->pred[v]);
+
         /* the ledger. A cell's new energy is E + gain - cap - upkeep - split - gift - rot, or 0
            with death = what it would have kept, so summed over the world
                energy after - energy before = light + minerals - cap - upkeep - rot - death
@@ -303,8 +361,12 @@ void gamma_step(GammaWorld *w)
         if (A) {
             L->cells_before++;
             L->energy_before += E;
-            L->light += w->light[v] >> 5;
-            L->minerals += m[v] >> 9u;
+            L->light += hidden ? 0 : w->light[v] >> 5;
+            L->minerals += hidden ? 0 : m[v] >> 9u;
+            L->hidden += hidden;
+            L->answered += answered;
+            L->solved += solved;
+            L->strikes += strike;
             L->received += recv;
             L->cap += E + gain - e1;
             L->upkeep += !starve;
@@ -316,6 +378,10 @@ void gamma_step(GammaWorld *w)
                     L->term++;
                 else if (starve)
                     L->starved++;
+                else if (killed)
+                    L->killed++;
+                else if (lonely)
+                    L->lonely++;
                 else
                     L->aborted++;
             }
@@ -350,7 +416,7 @@ void gamma_step(GammaWorld *w)
         unsigned l = w->light[up];
         o->light[v] = (uint8_t)(z == 0 ? gamma_sun(clock) : w->alive[up] ? l / 2 : l - l / 8);
         unsigned sum = 2u * m[v] + m[nb[0]] + m[nb[1]] + m[nb[2]] + m[nb[3]] + m[nb[4]] + m[nb[5]];
-        unsigned eat = A ? (m[v] >> 9u) << 6 : 0;  /* never more than sum / 8 */
+        unsigned eat = A && !hidden ? (m[v] >> 9u) << 6 : 0;  /* never more than sum / 8 */
         unsigned val = sum / 8 - eat + (die ? GAMMA_RELEASE : 0);
         if (val > GAMMA_MINERAL_MAX)
             val = GAMMA_MINERAL_MAX;
@@ -389,6 +455,7 @@ size_t gamma_soup(GammaWorld *w, double fraction, unsigned energy, uint64_t seed
         w->request[v] = w->offer[v] = w->born[v] = 0;
         w->gates[v] = 0;
         w->energy[v] = (uint8_t)(cell ? energy : 0);
+        w->credit[v] = (uint8_t)(cell ? GAMMA_SUNRISE >> GAMMA_ROUND_BITS : 0);
         w->clock[v] = GAMMA_SUNRISE;
         for (int i = 0; i < GAMMA_GATES; i++)
             w->genome[GAMMA_GATES * v + i] =
@@ -399,6 +466,24 @@ size_t gamma_soup(GammaWorld *w, double fraction, unsigned energy, uint64_t seed
         w->term[v] =
             (uint16_t)(w->alive[v] ? 1 + splitmix64(&s) % ((1u << GAMMA_TERM_BITS) - 1) : 0);
     return made;
+}
+
+size_t gamma_predators(GammaWorld *w, size_t count, uint64_t seed)
+{
+    uint64_t s = seed ^ 0x5EED0F0E5ull;
+    size_t have = 0;
+    for (size_t v = 0; v < w->n; v++)
+        have += w->pred[v] = w->pred[v] != 0;
+    for (size_t i = 0; i < count && have < w->n; i++) {
+        size_t v;
+        do
+            v = (size_t)(splitmix64(&s) % w->n);
+        while (w->pred[v]);
+        w->pred[v] = 1;
+        w->fresh[v] = 0;
+        have++;
+    }
+    return have;
 }
 
 void gamma_ledger_add(GammaLedger *sum, const GammaLedger *l)
@@ -421,6 +506,12 @@ void gamma_ledger_add(GammaLedger *sum, const GammaLedger *l)
     ADD(term);
     ADD(starved);
     ADD(aborted);
+    ADD(killed);
+    ADD(lonely);
+    ADD(hidden);
+    ADD(answered);
+    ADD(solved);
+    ADD(strikes);
     for (int d = 0; d < 6; d++)
         ADD(grants_by_dir[d]);
 #undef ADD
@@ -433,7 +524,8 @@ int gamma_ledger_closes(const GammaLedger *l)  /* each identity with its sums on
         by_dir += l->grants_by_dir[d];
     return l->energy_after + l->cap + l->upkeep + l->rot + l->death ==
                l->energy_before + l->light + l->minerals &&
-           l->cells_after + l->term + l->starved + l->aborted == l->cells_before + l->granted &&
+           l->cells_after + l->term + l->starved + l->killed + l->lonely + l->aborted ==
+               l->cells_before + l->granted &&
            l->received == l->given && by_dir == l->granted;
 }
 
@@ -455,6 +547,10 @@ long gamma_compare(const GammaWorld *a, const GammaWorld *b, const char **what)
                         : a->rng[v] != b->rng[v]         ? "random generator"
                         : a->light[v] != b->light[v]     ? "light"
                         : a->mineral[v] != b->mineral[v] ? "minerals"
+                        : a->token[v] != b->token[v]     ? "token"
+                        : a->credit[v] != b->credit[v]   ? "credit"
+                        : a->pred[v] != b->pred[v]       ? "predator"
+                        : a->fresh[v] != b->fresh[v]     ? "fresh"
                         : memcmp(a->genome + GAMMA_GATES * v, b->genome + GAMMA_GATES * v,
                                  GAMMA_GATES * sizeof *a->genome)
                             ? "genome"
@@ -644,6 +740,13 @@ int gen_gamma(Program *p, int xbits, int ybits, int zbits, GammaCells *c)
         c->clock[i] = cellf(b, "ck%d", i);
     for (int i = 0; i < GAMMA_TERM_BITS; i++)
         c->term[i] = cellf(b, "tm%d", i);
+    c->token = b_cell(b, "tok");
+    for (int i = 0; i < GAMMA_CREDIT_BITS; i++) {
+        c->credit[i] = cellf(b, "cr%d", i);
+        c->need[i] = cellf(b, "nd%d", i);
+    }
+    c->pred = b_cell(b, "pred");
+    c->fresh = b_cell(b, "fresh");
     for (int i = 0; i < GAMMA_GATES; i++)
         for (int j = 0; j < GAMMA_GATE_BITS; j++) {
             snprintf(name, sizeof name, "G%d_%d", i, j);
@@ -683,6 +786,7 @@ int gen_gamma(Program *p, int xbits, int ybits, int zbits, GammaCells *c)
     for (int i = 0; i < GAMMA_CLOCK_BITS; i++)
         b_half_adder(b, ck[i], ck_c[(i + 1) & 1], ck[i], ck_c[i & 1]);
     uint32_t midnight = ck_c[GAMMA_CLOCK_BITS & 1];
+    uint32_t judge = gate(b, G_AND, "judge", ck, GAMMA_ROUND_BITS);  /* a round's last tick */
     PART(GAMMA_PART_CLOCK);
 
     /* the dice: xorshift32 in place, the new state is this tick's random bits */
@@ -714,23 +818,47 @@ int gen_gamma(Program *p, int xbits, int ybits, int zbits, GammaCells *c)
             snprintf(name, sizeof name, "mn%d_%d", d, i);
             mn[d][i] = from_dir(&g, name, M[i], d);
         }
+    /* the social game: the neighbours' tokens and predators, the swap dice of the voxel below on
+       each axis; whether a predator is next to the cell; whether its credit is below the need */
+    uint32_t tk[6], pr[6], xs[3];
+    for (int d = 0; d < 6; d++) {
+        snprintf(name, sizeof name, "tk%d", d);
+        tk[d] = from_dir(&g, name, c->token, d);
+        snprintf(name, sizeof name, "pr%d", d);
+        pr[d] = from_dir(&g, name, c->pred, d);
+    }
+    for (int a = 0; a < 3; a++) {
+        snprintf(name, sizeof name, "xs%d", a);
+        xs[a] = from_dir(&g, name, x[GAMMA_SWAP_DICE], 2 * a + 1);
+    }
+    uint32_t seen = gate(b, G_OR, "seen", pr, 6);
+    uint32_t sh_c = gate(b, G_BUF, "sh_c", &one, 1), sh_s = b_cell(b, "sh_s");
+    for (int i = 0; i < GAMMA_CREDIT_BITS; i++) {  /* credit + ~need + 1: no carry out, below */
+        snprintf(name, sizeof name, "sh_n%d", i);
+        b_full_adder(b, sh_s, sh_c, c->credit[i], not1(b, name, c->need[i]), sh_c);
+    }
+    uint32_t shortc = not1(b, "short", sh_c);
     PART(GAMMA_PART_READS);
 
     /* the gates: a cell that is alive and not dividing runs them, in order, in place */
     uint32_t src[64], mx[32], na[GAMMA_ADDR_BITS];
     src[0] = one;
-    for (int j = 0; j < 3; j++)
-        src[1 + j] = x[j];
+    src[1] = x[0];
+    src[2] = c->token;
+    src[3] = judge;
     for (int d = 0; d < 6; d++) {
         src[4 + d] = occ[d];
         src[10 + 2 * d] = sig[d][0];
         src[11 + 2 * d] = sig[d][1];
     }
-    for (int j = 0; j < 3; j++) {
+    for (int j = 0; j < 3; j++)
         src[22 + j] = E[7 - j];
+    for (int j = 0; j < 2; j++) {
         src[25 + j] = L[7 - j];
         src[28 + j] = M[11 - j];
     }
+    src[27] = seen;
+    src[30] = shortc;
     src[31] = c->born;
     for (int i = 0; i < GAMMA_GATES; i++)
         src[32 + i] = gt[i];
@@ -894,11 +1022,27 @@ int gen_gamma(Program *p, int xbits, int ybits, int zbits, GammaCells *c)
     uint32_t gn[4], rv[GAMMA_ENERGY_BITS], rt[GAMMA_OFFER_BITS], e1[12], e2[8], e3[8], en[8];
     int w;
     unsigned max;
+    /* hiding (gate 23 of a cell that ran its gates), and the riddle: in a round's last tick, the
+       answer (gate 24) against the cell's token XOR the token of the cell it points at. Before
+       a dying cell's gates are cleared below. */
+    uint32_t hid = gate2(b, G_AND, "hid", act, gt[GAMMA_HIDE]), nhid = not1(b, "nhid", hid);
+    uint32_t pt_t[6];
+    for (int d = 0; d < 6; d++) {
+        snprintf(name, sizeof name, "pk_t%d", d);
+        pt_t[d] = gate2(b, G_AND, name, dsel[d], tk[d]);
+    }
+    uint32_t ptok = gate(b, G_OR, "ptok", pt_t, 6);
+    uint32_t want = gate2(b, G_XOR, "want", c->token, ptok);
+    uint32_t right = gate2(b, G_XNOR, "right", gt[GAMMA_ANSWER], want);
+    uint32_t qin[4] = {act, judge, target, right};
+    uint32_t solved = gate(b, G_AND, "solved", qin, 4);
     for (int j = 0; j < 3; j++)
         gn[j] = gate(b, G_BUF, j == 0 ? "gn0" : j == 1 ? "gn1" : "gn2", &L[5 + j], 1);
     w = 3;
     max = 7;
     add_into(b, gn, &w, &max, &M[9], 3, 0, "gn");
+    for (int j = 0; j < w; j++)  /* nothing from light and minerals while hiding */
+        b_gate2(b, G_AND, gn[j], gn[j], nhid);
     int wr = GAMMA_OFFER_BITS;
     unsigned maxr = (1u << GAMMA_OFFER_BITS) - 1;
     for (int j = 0; j < GAMMA_OFFER_BITS; j++) {
@@ -964,7 +1108,13 @@ int gen_gamma(Program *p, int xbits, int ybits, int zbits, GammaCells *c)
     uint32_t npk = not1(b, "npk", pK), pin[3] = {pA, pB, npk};
     uint32_t pok = gate(b, G_AND, "pok", pin, 3);
     uint32_t abort = gate2(b, G_AND, "abort", emb, not1(b, "npok", pok));
-    uint32_t die = gate2(b, G_OR, "die", starve, term_up);
+    uint32_t nfresh = not1(b, "nfresh", c->fresh);
+    uint32_t kin6[6] = {c->alive, c->pred, nfresh, x[GAMMA_STRIKE_DICE], x[GAMMA_STRIKE_DICE + 1], nhid};
+    uint32_t killed = gate(b, G_AND, "killed", kin6, 6);
+    uint32_t lin[3] = {c->alive, midnight, shortc};
+    uint32_t lonely = gate(b, G_AND, "lonely", lin, 3);
+    uint32_t din[4] = {starve, term_up, killed, lonely};
+    uint32_t die = gate(b, G_OR, "die", din, 4);
     b_gate2(b, G_AND, die, die, c->alive);
     b_gate2(b, G_OR, die, die, abort);
     uint32_t ndie = not1(b, "ndie", die), live = gate2(b, G_AND, "live", c->alive, ndie);
@@ -1095,6 +1245,7 @@ int gen_gamma(Program *p, int xbits, int ybits, int zbits, GammaCells *c)
     /* minerals: (2 m + the 6 neighbours) / 8, less what a cell eats (m/512 * 64, never more), plus
        what a dying one gives back, at most 4095 */
     uint32_t acc[GAMMA_MINERAL_BITS + 4], *d = acc + 3, sc2 = gate(b, G_BUF, "ms_c", &one, 1);
+    uint32_t eats = gate2(b, G_AND, "eats", c->alive, nhid);
     w = GAMMA_MINERAL_BITS;
     max = GAMMA_MINERAL_MAX;
     memcpy(acc, mn[0], sizeof mn[0]);
@@ -1105,7 +1256,7 @@ int gen_gamma(Program *p, int xbits, int ybits, int zbits, GammaCells *c)
         uint32_t y = one;
         if (i < 9) {
             snprintf(name, sizeof name, "et%d", i);
-            y = gate2(b, G_NAND, name, c->alive, M[i + 3]);  /* ~(alive & M[i + 3]) */
+            y = gate2(b, G_NAND, name, eats, M[i + 3]);  /* ~(eats & M[i + 3]) */
         }
         b_full_adder(b, d[i], sc2, d[i], y, sc2);
     }
@@ -1119,6 +1270,66 @@ int gen_gamma(Program *p, int xbits, int ybits, int zbits, GammaCells *c)
         b_reg(b, M[i], d[i]);
     }
     PART(GAMMA_PART_MINERALS);
+
+    /* the credit: + 1 for a round solved or a round's end while dividing, at most 15; 0 at
+       midnight and for an empty voxel or a dead cell; a new cell's the rounds of the day past,
+       the clock's top 4 bits */
+    uint32_t full = gate(b, G_AND, "cr_full", c->credit, GAMMA_CREDIT_BITS);
+    uint32_t cinc = gate2(b, G_AND, "cr_exc", busyA, judge);
+    b_gate2(b, G_OR, cinc, cinc, solved);
+    b_gate2(b, G_AND, cinc, cinc, not1(b, "cr_nfull", full));
+    uint32_t keep = gate2(b, G_AND, "cr_keep", live, not1(b, "cr_nmid", midnight)), cr_n[4];
+    for (int i = 0; i < GAMMA_CREDIT_BITS; i++) {
+        snprintf(name, sizeof name, "cr_n%d", i);
+        cr_n[i] = gate2(b, G_XOR, name, c->credit[i], cinc);
+        if (i + 1 < GAMMA_CREDIT_BITS)
+            b_gate2(b, G_AND, cinc, cinc, c->credit[i]);
+        b_gate2(b, G_AND, cr_n[i], cr_n[i], keep);
+        snprintf(name, sizeof name, "cr_b%d", i);
+        b_gate2(b, G_OR, cr_n[i], cr_n[i],
+                gate2(b, G_AND, name, newborn, ck[GAMMA_ROUND_BITS + i]));
+    }
+    /* the next round's token, drawn at the end of a round */
+    uint32_t tok_n = b_cell(b, "tok_n");
+    b_mux(b, tok_n, judge, not1(b, "njudge", judge), x[GAMMA_TOKEN_DICE], c->token);
+    /* the predators: on axis a (the clock's bits 1 and 2) a voxel is the lower of its pair when
+       the parity of its coordinate (the XOR of its Gray code bits) is the clock's bit 0; the pair
+       swaps on the lower voxel's dice; with the clock's bits 1 and 2 both 1 nobody moves */
+    uint32_t mv[3];
+    for (int a = 0; a < 3; a++) {
+        uint32_t ids[CUBE_DIMS];
+        for (int j = 0; j < g.k[a]; j++)
+            ids[j] = cellf(b, "ID%d", g.lo[a] + j);
+        snprintf(name, sizeof name, "par%d", a);
+        uint32_t par = gate(b, G_XOR, name, ids, g.k[a]);
+        snprintf(name, sizeof name, "low%d", a);
+        uint32_t low = gate2(b, G_XNOR, name, par, ck[0]);
+        snprintf(name, sizeof name, "nlow%d", a);
+        uint32_t nlow = not1(b, name, low);
+        snprintf(name, sizeof name, "pp%d", a);
+        uint32_t pp = b_cell(b, name);
+        b_mux(b, pp, low, nlow, pr[2 * a], pr[2 * a + 1]);
+        snprintf(name, sizeof name, "sw%d", a);
+        uint32_t sw = b_cell(b, name);
+        b_mux(b, sw, low, nlow, x[GAMMA_SWAP_DICE], xs[a]);
+        snprintf(name, sizeof name, "nsw%d", a);
+        uint32_t nsw = not1(b, name, sw);
+        snprintf(name, sizeof name, "mv%d", a);
+        mv[a] = b_cell(b, name);
+        b_mux(b, mv[a], sw, nsw, pp, c->pred);
+    }
+    uint32_t nck1 = not1(b, "nck1", ck[1]), nck2 = not1(b, "nck2", ck[2]);
+    uint32_t p_hi = b_cell(b, "p_hi"), p_lo = b_cell(b, "p_lo"), pred_n = b_cell(b, "pred_n");
+    b_mux(b, p_hi, ck[1], nck1, c->pred, mv[2]);
+    b_mux(b, p_lo, ck[1], nck1, mv[1], mv[0]);
+    b_mux(b, pred_n, ck[2], nck2, p_hi, p_lo);
+    uint32_t fresh_n = gate2(b, G_AND, "fresh_n", pred_n, not1(b, "npred", c->pred));
+    for (int i = 0; i < GAMMA_CREDIT_BITS; i++)
+        b_reg(b, c->credit[i], cr_n[i]);
+    b_reg(b, c->token, tok_n);
+    b_reg(b, c->pred, pred_n);
+    b_reg(b, c->fresh, fresh_n);
+    PART(GAMMA_PART_GAME);
     b_finish(b, p);
     c->cost[GAMMA_PART_REGISTERS] = p->len - mark;
 #undef PART
@@ -1179,6 +1390,11 @@ void gamma_to_cube(LaneCube *lc, const GammaCells *c, const GammaWorld *w)
             put(lm, c->rng, 32, lane, w->rng[v]);
             put(lm, c->light, GAMMA_LIGHT_BITS, lane, w->light[v]);
             put(lm, c->mineral, GAMMA_MINERAL_BITS, lane, w->mineral[v]);
+            put(lm, &c->token, 1, lane, w->token[v]);
+            put(lm, c->credit, GAMMA_CREDIT_BITS, lane, w->credit[v]);
+            put(lm, c->need, GAMMA_CREDIT_BITS, lane, w->need);
+            put(lm, &c->pred, 1, lane, w->pred[v]);
+            put(lm, &c->fresh, 1, lane, w->fresh[v]);
         }
 }
 
@@ -1206,5 +1422,17 @@ void gamma_from_cube(const LaneCube *lc, const GammaCells *c, GammaWorld *w)
             w->rng[v] = get(lm, c->rng, 32, lane);
             w->light[v] = (uint8_t)get(lm, c->light, GAMMA_LIGHT_BITS, lane);
             w->mineral[v] = (uint16_t)get(lm, c->mineral, GAMMA_MINERAL_BITS, lane);
+            w->token[v] = (uint8_t)get(lm, &c->token, 1, lane);
+            w->credit[v] = (uint8_t)get(lm, c->credit, GAMMA_CREDIT_BITS, lane);
+            w->pred[v] = (uint8_t)get(lm, &c->pred, 1, lane);
+            w->fresh[v] = (uint8_t)get(lm, &c->fresh, 1, lane);
         }
+    w->need = get(&lc->g[0], c->need, GAMMA_CREDIT_BITS, 0);
+}
+
+void gamma_set_need(LaneCube *lc, const GammaCells *c, unsigned need)
+{
+    for (unsigned grp = 0; grp < lc->groups; grp++)
+        for (unsigned lane = 0; lane < LANES; lane++)
+            put(&lc->g[grp], c->need, GAMMA_CREDIT_BITS, lane, need);
 }

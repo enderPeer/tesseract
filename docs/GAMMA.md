@@ -74,9 +74,12 @@ own dimensions of the cube in Gray code, x lowest, so every face neighbour is on
   later gate gets last tick's value: memory and oscillators come from wiring alone.
 - **Senses:** a constant 1, three random bits, which of the 6 neighbours hold a cell, 2 signal bits
   from each neighbour, the top 3 bits of the cell's energy, of the light and of the minerals where
-  it is, and "I was just born".
+  it is, and "I was just born". Since 11f: one random bit, two bits of light and of minerals, and
+  four senses for the social game (the cell's token, the round's end, a predator where it points,
+  short of the need).
 - **Actions:** gates 26 and 27 are the signals the neighbours see; gate 25 gives energy, gate 28
-  asks to divide, gates 29–31 say in which direction, for both.
+  asks to divide, gates 29–31 say in which direction, for both. Since 11f gate 23 hides and gate
+  24 answers.
 - **Division:** a cell asks when it is free and has energy 32 or more. An empty voxel grants one
   of the cells asking for it, the lowest direction first, and the cell learns it in the same tick.
   For the next 32 ticks both are busy and do not run their gates: every tick the parent's genome
@@ -150,6 +153,39 @@ kills the second layer and the canopy cannot be recolonised from the floor; the 
 (Leviticus 19:9) as a cap on the harvest do not open the dark; eating one another (Genesis 9:3) is
 the bigger lever but a step of its own.
 
+## The social game (step 11f)
+
+The user asked for a cooperative game in which communication is the only key to staying alive:
+every cell must earn a social reward by a set time, by talking and solving, and predators can be
+escaped by talking. The exact rules are in [src/gamma.h](../src/gamma.h); the game is off unless
+the host turns it on (`--need`, `--ramp`, `--predators`).
+
+- **The riddle.** Every voxel holds a token, one bit, that only the cell there can see, and draws a
+  new one every round of 16 ticks. In the last tick of a round (a sense says when), a cell that
+  points at another cell solves the round if its answer gate equals its own token XOR the token of
+  the cell it points at. That token reaches it only one way: the other cell says it on one of its
+  two signals, and the cell hears it, decodes it and combines it with its own. A cell that guesses
+  is right half the time.
+- **The social reward.** A cell counts the rounds it solved since midnight (its credit, at most 15).
+  At midnight a cell whose credit is below the world's need dies of loneliness, and every credit
+  starts again at 0. A new cell starts with the rounds of the day already past, so it must solve
+  the rest at the same rate as everyone, and a round that ends while a cell is dividing counts
+  (it cannot run its gates then). A sense tells
+  a cell that it is still short of the need. The need can rise slowly (`--ramp D`: by 1 every D
+  days), so that a soup of random genomes has time to find the riddle: with the need at 12 of 16,
+  guessing passes 4 % of the days.
+- **Predators.** A few hundred of them wander through the world, cells or not, by swapping places
+  within pairs of voxels, so that their number never changes. A predator that has been in a voxel
+  for a tick strikes the cell there one tick in four, and kills it unless the cell hides. Hiding is
+  an action (gate 23), and a hiding cell takes no light and no minerals that tick, so a cell that
+  hides all the time starves. A cell cannot sense a predator in its own voxel. Its neighbours can:
+  a cell senses a predator next to it from the tick the predator arrives. A neighbour's alarm, on
+  its signals, is heard one tick later, which is the first tick in which the predator can strike.
+  Without a neighbour that warns, a cell can only guess when to hide.
+
+The two pressures pull on the same few wires. A cell has two signal bits for its token and for the
+alarm, and one direction, which it uses to divide, to give and to answer.
+
 ## What it does so far
 
 From a soup of 10 % random cells the world fills the sunlit top layers and the mineral-rich floor;
@@ -170,6 +206,13 @@ what remains gives on conditions and goes to kin far above chance. Energy is sti
 day, the floor knows no weather, and the dark middle is still empty. ROADMAP step 11d has the
 numbers side by side with 11c.
 
+In the social game (11f) talking is selected: with the need at 12 of 16, the rounds solved rise
+from chance, 50 %, to 64–67 % within two million ticks, and the common genomes say their token on a
+signal and combine what their neighbour says with their own. It is not finished: a quarter of the
+cells still die of loneliness every midnight. No alarm call evolved: the cells hide blindly, a
+third to almost half of the time, because hiding costs only food and food is not scarce. ROADMAP
+step 11f has the numbers.
+
 ## Steps
 
 | | | |
@@ -179,6 +222,6 @@ numbers side by side with 11c.
 | 11c | bodies: energy given from cell to cell, and asking, granting and being born in one tick | ✅ |
 | 11d | weather, from the three books: day and night, manna, an appointed term, the lot, the measure | ✅ |
 | 11e | `alpha gamma --serve`: a page that draws the cube live; click a cell to see its circuit | ✅ |
-| 11f | the social game: a reward only communication earns, predators only communication escapes | ⬜ |
+| 11f | the social game: a reward only communication earns, predators only communication escapes | ✅ |
 | 11g | the twin world across the 16th dimension: butterfly and control modes | ⬜ |
 | 11h | AVX-512 (5c), the world across the cluster (7g) | ⬜ |

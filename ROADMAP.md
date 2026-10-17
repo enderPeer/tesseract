@@ -22,11 +22,11 @@ a small LAN cluster of four Ubuntu machines; yours will differ.
 | 8 | Toward an operating system | 8a ✅ 8b ✅ 8c ⬜ | beta, a byte computer with a monitor: 16,384 of them, 1.3 × 10^9 instructions/s |
 | 9 | Real 1-bit hardware (FPGA) | ⬜ | |
 | 10 | Superoptimizer | ✅ | every library building block provably shortest; full adder 28 → 19, sort 2× faster |
-| 11 | Gamma: a world of cells on the cube | 11a ✅ 11b ✅ 11c ✅ 11d ✅ 11e ✅ 11f–11h ⬜ | cells that are NAND circuits evolve from a random soup, divide, feed each other, and live under day and night, manna, a term and the lot; ~11,000 ticks/s for 32,768 voxels |
+| 11 | Gamma: a world of cells on the cube | 11a ✅ 11b ✅ 11c ✅ 11d ✅ 11e ✅ 11f ✅ 11g–11h ⬜ | cells that are NAND circuits evolve from a random soup, divide, feed each other, live under day and night, manna, a term and the lot, and must talk to live; ~11,000 ticks/s for 32,768 voxels |
 | – | ~~Control flow with lane masks~~ | parked | needs a new instruction (see the end) |
 
-**Open:** gamma's ecology (the floor knows no weather and holds 60 % of the cells: see 11d) and
-11f (the social game), 10 (optimize for the compiler's cost, not only the length), 7g (one cube across
+**Open:** gamma's ecology (the floor knows no weather and holds 60 % of the cells: see 11d; energy
+is not scarce, so hiding from predators costs little and no alarm call evolved: see 11f), 10 (optimize for the compiler's cost, not only the length), 7g (one cube across
 the cluster), 5c (AVX-512), 8c (more memory, networked betas), 9 (FPGA).
 
 ## 1. Reference machine ✅
@@ -1120,9 +1120,77 @@ suite unchanged (`test_gamma` 75 checks). Fixed from the reviews: on Windows the
 exclusively (`SO_REUSEADDR` there would let a second server share it), GET only, the left mouse
 button only.
 
-### 11f–11h ⬜
+### 11f. The social game ✅
 
-- 11f the social game: communication as the key to staying alive (in progress).
+The user asked for a cooperative game in which communication is the only key to staying alive:
+every cell must earn a social reward by a set time, by talking and solving, and predators can be
+escaped by talking. The rules are in [src/gamma.h](src/gamma.h), the reasons in
+[docs/GAMMA.md](docs/GAMMA.md); the game is off unless the host turns it on.
+
+- **The riddle.** Every voxel draws a token, one bit, each round of 16 ticks, and only the cell
+  there sees it. In a round's last tick a cell that points at another cell solves the round if its
+  answer gate equals its own token XOR the other's, which it can only hear on the other's signals.
+  Guessing is right half the time.
+- **The social reward.** The rounds solved since midnight are the cell's credit. At midnight a cell
+  below the world's need (`--need N`, 0–15) dies of loneliness. `--ramp D` raises the need from 0
+  by 1 every D days, so that the soup has time. A new cell starts with the rounds of the day already
+  past; a round that ends while a cell divides counts.
+- **Predators** (`--predators P`) wander by swapping places in pairs of voxels, so their number never
+  changes. After their first tick in a voxel they strike, 1 in 4 per tick, and kill the cell there
+  unless it hides (gate 23, which costs that tick's light and minerals). A cell cannot sense a
+  predator in its own voxel, only next to it, so a warning has to come from a neighbour, one tick
+  before the first strike can fall.
+- **The command:** a game line under each census (answers and rounds solved, hiding, strikes,
+  kills and how many of the struck hid, deaths of loneliness, the need, the predators, the cells
+  below the need), every census at clock 241 so that its 16 ticks of plain C hold a round's end and
+  midnight. The live view (frame version 2) draws predators as red cubes and hiding cells dark, and
+  the clicked cell shows its token, credit and the need.
+
+The circuit: 53,905 instructions per tick in 5 segments (11d: 52,628 in 4): where am I 616, clock
+102, dice 488, neighbour reads 4,185, gates 33,964, asking and offering 180, grants 2,539, partner
+reads 2,683, energy and state 2,900, genome copy 3,437, light 356, minerals 1,834, the game 425,
+registers 196. 7,900 ticks/s on the 6 cores of the Ryzen 7600X (the experiment's column ran on the i7-8700K).
+
+The first version gave a new cell a full credit and showed a cell a predator only in the voxel it
+pointed at. With the need at 12 the riddle stayed at chance for a million ticks: loneliness only
+killed cells that had already reproduced. The rules above came out of that run. Seed 1, 32 × 32 ×
+32, the need ramped to 12 over 192 days, on the Ryzen 7600X:
+
+| | no game, 1M ticks | the riddle, 256 predators, 2M | the same, 1,024 predators, 5M | answer = the other's token (an experiment), 2M |
+|---|---:|---:|---:|---:|
+| cells | 5,991 | 5,633 | 5,602 | 6,353 |
+| rounds solved (chance: 50 %) | — | 64 % at 1M, 67 % at 2M | 58–63 % | 72 % at 0.4M, 74–77 % after |
+| deaths of loneliness per midnight | — | 1,500–1,700 | 1,300–1,450 | 900–1,600 |
+| killed by predators per tick | — | 2.6–4.7 | 12–15 | 3–6.5 |
+| struck cells that hid / all cells hiding | — | 31–58 % / 38–43 % | 32–50 % / 35–46 % | 8–40 % / 17–36 % |
+
+What it says:
+- **Talking is selected.** The rounds solved rise well above chance, and the common genomes say
+  their token on a signal (one says it whenever there is a cell above it) and combine what the
+  neighbour in their direction says with their own token. It is not finished: a world at the edge
+  of the need loses a quarter of its cells every midnight, and copying a token (the experiment) is
+  learned faster than XOR. The diversity stays very high (the most common of 3,000 genomes holds
+  0.3 %), so a protocol has to work between neighbours that are not clones.
+- **No alarm call evolved.** The struck cells hid no more often than cells hide in general: the
+  cells hide blindly, 35–46 % of the time. Hiding costs only the tick's food, and energy is not
+  scarce (11d), so blind hiding is cheap and a warning adds little to it. Making energy scarce (the
+  floor) or hiding dear is what would make the warning pay.
+
+Done: `test_gamma`, 90 checks (11d: 75). New, each worked from the contract: two talkers that solve
+all 16 rounds of a day, two guessers whose credit follows the other's token round by round, a lone
+cell; midnight with need 12 (the talkers live, the lone cell and the guessers below 12 die); the
+token drawn from bit 24 of the dice at a round's end and at no other tick; a new cell's credit (the
+rounds past) and a dividing cell's round; 40 predators for 300 ticks, never one more or less, still
+when the clock says so, each from its pair, and a swap worked by hand; a strike on an idle cell, a
+hiding one (no light) and a fresh predator; the alarm, with a watcher (the cell lives) and without
+(it is killed); the ledger with predators and the need, both identities after every tick; the
+engines from random states of every new field, and compiled against plain C from a soup with
+predators and need 8 through midnights and rounds. Five injected bugs were all caught: one strike
+dice bit, food while hiding, the pair parity in the circuit, the credit not saturating, sight in
+the cell's own voxel. The whole suite is 2,679 checks under gcc, and MSVC builds without warnings.
+
+### 11g–11h ⬜
+
 - 11g the twin world across the 16th dimension: butterfly and control modes.
 - 11h AVX-512 (5c), the world across the cluster (7g).
 

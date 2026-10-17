@@ -2,7 +2,8 @@
    with random genomes goes in, the compiled cube is checked against plain C after every one of the
    first ticks, and then runs on all threads, with a census every so often, and under each census
    the ledger of 16 ticks of plain C from there. With --serve the census gives way to the live
-   view (step 11e): the world runs batch by batch and a page in the browser looks at it. */
+   view (step 11e): the world runs batch by batch and a page in the browser looks at it. With
+   --need and --predators the social game of step 11f is on. */
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,6 +73,7 @@ static void usage(void)
     fputs("usage: alpha gamma [--size X,Y,Z] [--soup P] [--energy E] [--settle N] [--check C]\n"
           "                   [--ticks T] [--every K] [--seconds S] [--seed S] [--show]\n"
           "                   [--threads N] [--exclude LIST] [--idle] [--serve PORT]\n"
+          "                   [--need N] [--ramp D] [--predators P]\n"
           "  --size X,Y,Z   the world, voxels per axis (powers of two, 2 to 512 each, 512 to\n"
           "                 65536 in all; one number for a cube), default 32\n"
           "  --soup P       percent of voxels that start with a cell, random genome (default 10)\n"
@@ -84,8 +86,53 @@ static void usage(void)
           "  --show         at the end, a slice through the world\n"
           "  --genes N      at the end, the N most common genomes as circuits\n"
           "  --serve PORT   a live view of the world in the browser at http://127.0.0.1:PORT/\n"
-          "                 (instead of the census; --every ticks per batch, default 500)\n",
+          "                 (instead of the census; --every ticks per batch, default 500)\n"
+          "  --need N       the social game (step 11f): rounds of the riddle a cell must solve\n"
+          "                 by midnight, 0 to 15 (default 0: off)\n"
+          "  --ramp D       the need rises from 0 by 1 every D days (256 ticks) after the soup,\n"
+          "                 up to N (default 0: N from the start)\n"
+          "  --predators P  predators put in with the soup (default 0)\n",
           stderr);
+}
+
+/* ---- the social game's need over time ------------------------------------------------------ */
+
+typedef struct {
+    unsigned need, ramp;  /* the need at the end, and days per step up (0: the need from the start) */
+} Need;
+
+static unsigned need_at(const Need *nd, unsigned long long t)  /* t: ticks since the soup */
+{
+    if (!nd->ramp)
+        return nd->need;
+    unsigned long long k = t / (256ull * nd->ramp);
+    return k < nd->need ? (unsigned)k : nd->need;
+}
+
+/* the next tick after t at which the need changes, or ULLONG_MAX */
+static unsigned long long need_next(const Need *nd, unsigned long long t)
+{
+    if (!nd->ramp || need_at(nd, t) >= nd->need)
+        return ~0ull;
+    unsigned long long step = 256ull * nd->ramp;
+    return (t / step + 1) * step;
+}
+
+/* runs the cube from tick t to tick end, the need changing on the way where it must; returns the
+   seconds the cube ran */
+static double run_to(const JitCode *jc, LaneCube *lc, const GammaCells *cells, int k, const int *ids,
+                     int idle, const Need *nd, unsigned long long *t, unsigned long long end)
+{
+    double sec = 0;
+    while (*t < end) {
+        unsigned long long stop = need_next(nd, *t);
+        if (stop > end)
+            stop = end;
+        sec += par_cube_run(jc, lc, k, ids, idle, stop - *t, NULL);
+        *t = stop;
+        gamma_set_need(lc, cells, need_at(nd, *t));
+    }
+    return sec;
 }
 
 /* ---- the census --------------------------------------------------------------------------- */
@@ -251,7 +298,7 @@ static void census(const GammaWorld *w, unsigned long long tick)
 /* The ledger: a copy of the world runs LEDGER_TICKS ticks of plain C (in `scratch`, made with
    gamma_world_init once), the ledgers summed and printed per tick, and whether every one of the
    single ticks closes (the two identities of gamma.h). The cube is not touched. */
-static void ledger_line(const GammaWorld *w, GammaWorld *scratch)
+static void ledger_line(const GammaWorld *w, GammaWorld *scratch, int game)
 {
     GammaLedger sum = {0};
     int closes = 1;
@@ -271,6 +318,26 @@ static void ledger_line(const GammaWorld *w, GammaWorld *scratch)
            (double)sum.grants_by_dir[1] * per, (double)sum.grants_by_dir[2] * per,
            (double)sum.grants_by_dir[3] * per, (double)sum.grants_by_dir[4] * per,
            (double)sum.grants_by_dir[5] * per, closes ? "closes" : "DOES NOT CLOSE");
+    if (game) {  /* the census sits at clock 241, so the 16 ticks hold a round's end and midnight */
+        size_t cells = 0, below = 0, preds = 0;
+        for (size_t v = 0; v < w->n; v++) {
+            preds += w->pred[v];
+            if (w->alive[v]) {
+                cells++;
+                below += w->credit[v] < w->need;
+            }
+        }
+        printf("%9s riddle: %6llu answered, %5.1f%% solved (chance 50%%) | hiding %5.2f%% of cells "
+               "| strikes %5.2f, killed %5.2f (%4.1f%% of the struck hid), lonely %6.2f per tick | need "
+               "%u, %zu predators, %4.1f%% of cells below it\n", "game",
+               (unsigned long long)sum.answered,
+               sum.answered ? 100.0 * (double)sum.solved / (double)sum.answered : 0.0,
+               sum.cells_before ? 100.0 * (double)sum.hidden / (double)sum.cells_before : 0.0,
+               (double)sum.strikes * per, (double)sum.killed * per,
+               sum.strikes ? 100.0 * (double)(sum.strikes - sum.killed) / (double)sum.strikes : 0.0,
+               (double)sum.lonely * per, w->need,
+               preds, cells ? 100.0 * (double)below / (double)cells : 0.0);
+    }
     fflush(stdout);
 }
 
@@ -311,18 +378,26 @@ static void source_name(unsigned a, char *buf, size_t len)
 {
     if (a == 0)
         snprintf(buf, len, "1");
-    else if (a < 4)
-        snprintf(buf, len, "rnd%u", a - 1);
+    else if (a == 1)
+        snprintf(buf, len, "rnd");
+    else if (a == 2)
+        snprintf(buf, len, "token");
+    else if (a == 3)
+        snprintf(buf, len, "round end");
     else if (a < 10)
         snprintf(buf, len, "occ:%s", dir_name[a - 4]);
     else if (a < 22)
         snprintf(buf, len, "sig:%s.%u", dir_name[(a - 10) / 2], (a - 10) % 2);
     else if (a < 25)
         snprintf(buf, len, "E%u", 29 - a);  /* the top bits: E7, E6, E5 */
-    else if (a < 28)
-        snprintf(buf, len, "L%u", 32 - a);
-    else if (a < 31)
-        snprintf(buf, len, "M%u", 39 - a);
+    else if (a < 27)
+        snprintf(buf, len, "L%u", 32 - a);  /* L7, L6 */
+    else if (a == 27)
+        snprintf(buf, len, "seen");
+    else if (a < 30)
+        snprintf(buf, len, "M%u", 39 - a);  /* M11, M10 */
+    else if (a == 30)
+        snprintf(buf, len, "short");
     else if (a == 31)
         snprintf(buf, len, "born");
     else
@@ -344,16 +419,16 @@ static size_t cat(char *buf, size_t len, size_t at, const char *fmt, ...)
 enum { GENOME_TEXT = 4096 };  /* room for print_genome: 33 lines */
 
 /* One genome as a circuit, into buf: every gate with its two sources, which gates feed the
-   actions (gates 26 .. 31, backwards along the wires), and which are constant whatever the senses
+   actions (gates 23 .. 31, backwards along the wires), and which are constant whatever the senses
    say (a NAND with a 0 input is 1, with two 1 inputs 0; repeated until nothing changes, since
    later gates feed earlier ones a tick later). Returns the length. */
 static size_t print_genome(const uint16_t *g, char *buf, size_t len)
 {
-    static const char *const action[7] = {"  <- give", "  <- signal 0", "  <- signal 1",
-                                          "  <- divide", "  <- dir bit 0", "  <- dir bit 1",
-                                          "  <- dir bit 2"};
+    static const char *const action[9] = {"  <- hide", "  <- answer", "  <- give",
+                                          "  <- signal 0", "  <- signal 1", "  <- divide",
+                                          "  <- dir bit 0", "  <- dir bit 1", "  <- dir bit 2"};
     int live[GAMMA_GATES] = {0}, val[64], stack[GAMMA_GATES], n = 0;
-    for (int i = GAMMA_GIVE; i < GAMMA_GATES; i++)
+    for (int i = GAMMA_HIDE; i < GAMMA_GATES; i++)
         live[stack[n++] = i] = 1;
     while (n) {
         int i = stack[--n];
@@ -386,9 +461,12 @@ static size_t print_genome(const uint16_t *g, char *buf, size_t len)
     }
     static const char *const fixed[3] = {"always off", "always on", "decided by the senses"};
     size_t at = cat(buf, len, 0,
-                    "  %d of 32 gates feed the actions; divide is %s, give is %s, the direction %s\n",
+                    "  %d of 32 gates feed the actions; divide is %s, give is %s, hide is %s, the "
+                    "answer is %s, the direction %s\n",
                     nlive, fixed[val[32 + GAMMA_DIVIDE] < 0 ? 2 : val[32 + GAMMA_DIVIDE]],
                     fixed[val[32 + GAMMA_GIVE] < 0 ? 2 : val[32 + GAMMA_GIVE]],
+                    fixed[val[32 + GAMMA_HIDE] < 0 ? 2 : val[32 + GAMMA_HIDE]],
+                    fixed[val[32 + GAMMA_ANSWER] < 0 ? 2 : val[32 + GAMMA_ANSWER]],
                     !dir_known ? "decided by the senses" : dir < 6 ? dir_name[dir] : "none (6 or 7)");
     for (int i = 0; i < GAMMA_GATES; i++) {
         char a[24], b[24];
@@ -396,7 +474,7 @@ static size_t print_genome(const uint16_t *g, char *buf, size_t len)
         source_name(g[i] >> GAMMA_ADDR_BITS & 63, b, sizeof b);
         at = cat(buf, len, at, "  %c g%-2d = NAND(%-10s %-10s)%s%s\n", live[i] ? '*' : ' ', i, a, b,
                  val[32 + i] < 0 ? "" : val[32 + i] ? "  = 1 always" : "  = 0 always",
-                 i >= GAMMA_GIVE ? action[i - GAMMA_GIVE] : "");
+                 i >= GAMMA_HIDE ? action[i - GAMMA_HIDE] : "");
     }
     return at;
 }
@@ -426,13 +504,16 @@ static void print_genomes(const GammaWorld *w, int n)
 
 /* ---- the live view (step 11e) ------------------------------------------------------------- */
 
-/* The frame the page polls, little-endian: "GAMA"; u32 version 1; u64 tick; u8 xbits, ybits,
+/* The frame the page polls, little-endian: "GAMA"; u32 version 2; u64 tick; u8 xbits, ybits,
    zbits, clock; u32 cells, busy (dividing), genomes (distinct, among the cells not being born),
-   ticks per second (0 while paused); u8 paused, 3 bytes 0; 26 x u32 the cells of the genomes
-   'A' .. 'Z' (0 beyond the count); then 2 bytes per voxel in voxel order, the class (0 empty,
-   1 .. 26 a cell of genome 'A' .. 'Z', 27 of another, 28 being born) and the energy; then for
-   every layer z the average light and the average minerals >> 4, a byte each. */
-enum { FRAME_LETTERS = 26, FRAME_HEAD = 40 + 4 * FRAME_LETTERS };  /* the voxels start at 144 */
+   ticks per second (0 while paused); u8 paused, u8 need, 2 bytes 0; 26 x u32 the cells of the
+   genomes 'A' .. 'Z' (0 beyond the count); u32 predators, cells below the need, cells hiding
+   (gate 23 of a free cell), 0; then 2 bytes per voxel in voxel order, the class (bits 0-4: 0
+   empty, 1 .. 26 a cell of genome 'A' .. 'Z', 27 of another, 28 being born; bit 6 the cell
+   hides, bit 7 a predator is there) and the energy; then for every layer z the average light and
+   the average minerals >> 4, a byte each. Version 1 (step 11e) had no need, no predators and no
+   hiding, and the voxels at 144. */
+enum { FRAME_LETTERS = 26, FRAME_GAME = 40 + 4 * FRAME_LETTERS, FRAME_HEAD = FRAME_GAME + 16 };
 
 static void put32(uint8_t *p, uint32_t x)
 {
@@ -456,13 +537,16 @@ static void build_frame(const GammaWorld *w, unsigned long long tick, unsigned t
 {
     size_t layer = (size_t)1 << (w->xbits + w->ybits), Z = (size_t)1 << w->zbits;
     Kind *k;
-    size_t nk = kinds_of(w, &k), cells = 0, busy = 0;
+    size_t nk = kinds_of(w, &k), cells = 0, busy = 0, preds = 0, below = 0, hiding = 0;
     for (size_t v = 0; v < w->n; v++) {
         cells += w->alive[v];
         busy += w->alive[v] && w->busy[v];
+        preds += w->pred[v];
+        below += w->alive[v] && w->credit[v] < w->need;
+        hiding += w->alive[v] && !w->busy[v] && (w->gates[v] >> GAMMA_HIDE & 1);
     }
     memcpy(f, "GAMA", 4);
-    put32(f + 4, 1);
+    put32(f + 4, 2);
     put64(f + 8, tick);
     f[16] = (uint8_t)w->xbits;
     f[17] = (uint8_t)w->ybits;
@@ -473,9 +557,14 @@ static void build_frame(const GammaWorld *w, unsigned long long tick, unsigned t
     put32(f + 28, (uint32_t)nk);
     put32(f + 32, tps);
     f[36] = (uint8_t)paused;
-    f[37] = f[38] = f[39] = 0;
+    f[37] = (uint8_t)w->need;
+    f[38] = f[39] = 0;
     for (size_t i = 0; i < FRAME_LETTERS; i++)
         put32(f + 40 + 4 * i, i < nk ? (uint32_t)k[i].count : 0);
+    put32(f + FRAME_GAME, (uint32_t)preds);
+    put32(f + FRAME_GAME + 4, (uint32_t)below);
+    put32(f + FRAME_GAME + 8, (uint32_t)hiding);
+    put32(f + FRAME_GAME + 12, 0);
     uint8_t *p = f + FRAME_HEAD;
     for (size_t v = 0; v < w->n; v++, p += 2) {
         unsigned cls = 0;
@@ -488,6 +577,10 @@ static void build_frame(const GammaWorld *w, unsigned long long tick, unsigned t
                 if (k[i].hash == h)
                     cls = (unsigned)i + 1;
         }
+        if (w->alive[v] && !w->busy[v] && (w->gates[v] >> GAMMA_HIDE & 1))
+            cls |= 64;
+        if (w->pred[v])
+            cls |= 128;
         p[0] = (uint8_t)cls;
         p[1] = w->alive[v] ? w->energy[v] : 0;
     }
@@ -508,14 +601,17 @@ static void build_frame(const GammaWorld *w, unsigned long long tick, unsigned t
 static size_t cell_text(const GammaWorld *w, size_t v, char *buf, size_t len)
 {
     unsigned X = 1u << w->xbits, Y = 1u << w->ybits;
-    size_t at = cat(buf, len, 0, "voxel %zu: x %u, y %u, z %u; light %u, minerals %u\n", v,
-                    (unsigned)(v & (X - 1)), (unsigned)(v >> w->xbits & (Y - 1)),
+    size_t at = cat(buf, len, 0, "voxel %zu: x %u, y %u, z %u; light %u, minerals %u, token %u%s\n",
+                    v, (unsigned)(v & (X - 1)), (unsigned)(v >> w->xbits & (Y - 1)),
                     (unsigned)(v >> (w->xbits + w->ybits)), w->light[v],
-                    w->mineral[v] >> GAMMA_MINERAL_FRAC);
+                    w->mineral[v] >> GAMMA_MINERAL_FRAC, w->token[v],
+                    !w->pred[v] ? "" : w->fresh[v] ? "; a predator, just come" : "; a predator");
     if (!w->alive[v])
         return cat(buf, len, at, "empty\n");
-    at = cat(buf, len, at, "cell: energy %u, term %u, %s\n", w->energy[v], w->term[v],
-             !w->busy[v] ? "free" : w->embryo[v] ? "being born" : "dividing");
+    at = cat(buf, len, at, "cell: energy %u, term %u, %s; credit %u, the need %u%s\n", w->energy[v],
+             w->term[v], !w->busy[v] ? "free" : w->embryo[v] ? "being born" : "dividing",
+             w->credit[v], w->need,
+             !w->busy[v] && (w->gates[v] >> GAMMA_HIDE & 1) ? "; hiding" : "");
     at = cat(buf, len, at, "gates: ");
     for (int i = 0; i < GAMMA_GATES; i++)
         at = cat(buf, len, at, "%u", w->gates[v] >> i & 1);
@@ -528,7 +624,7 @@ static size_t cell_text(const GammaWorld *w, size_t v, char *buf, size_t len)
    /resume starts them again, /step?n=K runs K ticks once while paused. */
 static void serve_loop(GammaServer *s, const char *argv0, const JitCode *jc, LaneCube *lc,
                        const GammaCells *cells, GammaWorld *w, int k, const int *ids, int idle,
-                       unsigned long long every, unsigned long long t)
+                       unsigned long long every, unsigned long long t, const Need *nd)
 {
     static const char text[] = "text/plain; charset=utf-8";
     size_t fsize = frame_size(w);
@@ -545,8 +641,7 @@ static void serve_loop(GammaServer *s, const char *argv0, const JitCode *jc, Lan
         unsigned long long n = paused ? step : every;
         step = 0;
         if (n) {
-            double sec = par_cube_run(jc, lc, k, ids, idle, n, NULL);
-            t += n;
+            double sec = run_to(jc, lc, cells, k, ids, idle, nd, &t, t + n);
             gamma_from_cube(lc, cells, w);
             tps = sec > 0 ? (unsigned)((double)n / sec) : 0;
             changed = 1;
@@ -601,6 +696,8 @@ int cmd_gamma(const char *argv0, int argc, char **argv)
     unsigned long long settle = 2000, check = 100, ticks = 10000, every = 0, seed = 1, port = 0;
     double soup = 10, seconds = 0;
     unsigned energy = 64;
+    unsigned long long predators = 0;
+    Need nd = {0, 0};
     static unsigned char excluded[1024];
     for (int i = 0; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
@@ -640,6 +737,12 @@ int cmd_gamma(const char *argv0, int argc, char **argv)
             continue;
         } else if (!strcmp(a, "--genes") && v) {
             genes = atoi(v);
+        } else if (!strcmp(a, "--need") && v) {
+            nd.need = (unsigned)strtoul(v, NULL, 10);
+        } else if (!strcmp(a, "--ramp") && v) {
+            nd.ramp = (unsigned)strtoul(v, NULL, 10);
+        } else if (!strcmp(a, "--predators") && v) {
+            predators = strtoull(v, NULL, 10);
         } else if (!strcmp(a, "--serve") && v) {
             port = strtoull(v, NULL, 10);
             if (port < 1 || port > 65535) {
@@ -657,10 +760,13 @@ int cmd_gamma(const char *argv0, int argc, char **argv)
         fprintf(stderr, "the world must have 512 to 65536 voxels (it has 2^%d)\n", dims);
         return 2;
     }
-    if (energy > GAMMA_ENERGY_MAX || soup < 0 || soup > 100) {
-        fputs("--energy must be 0 to 255, --soup 0 to 100\n", stderr);
+    if (energy > GAMMA_ENERGY_MAX || soup < 0 || soup > 100 || nd.need > GAMMA_CREDIT_MAX ||
+        nd.ramp > 100000 || predators > (1ull << dims)) {
+        fputs("--energy must be 0 to 255, --soup 0 to 100, --need 0 to 15, --ramp at most 100000, "
+              "--predators at most the voxels\n", stderr);
         return 2;
     }
+    int game = nd.need > 0 || predators > 0;
     if (check > ticks)
         ticks = check;
     if (!every)
@@ -714,16 +820,28 @@ int cmd_gamma(const char *argv0, int argc, char **argv)
         par_cube_run(&jc, &lc, k, ids, idle, settle, NULL);
     gamma_from_cube(&lc, &cells, &want);
     size_t seeded = gamma_soup(&want, soup / 100, energy, seed);
+    gamma_predators(&want, (size_t)predators, seed);
+    want.need = need_at(&nd, 0);
     gamma_to_cube(&lc, &cells, &want);
     printf("the fields settled for %llu ticks; %zu cells went in with random genomes (%.1f %%), "
            "energy %u each,\nat sunrise: the clock at %d of a %d-tick day\n", settle, seeded,
            100.0 * (double)seeded / (double)want.n, energy, GAMMA_SUNRISE, 1 << GAMMA_CLOCK_BITS);
+    if (game) {
+        printf("the social game: a cell must solve %u of the 16 rounds of a day by midnight", nd.need);
+        if (nd.ramp)
+            printf(", the need rising from 0 by 1 every %u day%s", nd.ramp, nd.ramp > 1 ? "s" : "");
+        printf("; %llu predators\n", predators);
+    }
 
     /* every voxel against plain C, tick by tick */
     long bad = -1;
     const char *what = NULL;
     unsigned long long t = 0;
     while (t < check && bad < 0) {
+        if (need_at(&nd, t) != want.need) {
+            want.need = need_at(&nd, t);
+            gamma_set_need(&lc, &cells, want.need);
+        }
         jit_cube_tick(&jc, &lc);
         gamma_step(&want);
         gamma_from_cube(&lc, &cells, &got);
@@ -744,22 +862,26 @@ int cmd_gamma(const char *argv0, int argc, char **argv)
     if (bad < 0 && port) {
         printf("serving the world at http://127.0.0.1:%llu/ (Ctrl+C stops it)\n", port);
         fflush(stdout);
-        serve_loop(&server, argv0, &jc, &lc, &cells, &got, k, ids, idle, every, t);
+        serve_loop(&server, argv0, &jc, &lc, &cells, &got, k, ids, idle, every, t, &nd);
     } else if (bad < 0) {
         census_head(Z);
+        gamma_set_need(&lc, &cells, need_at(&nd, t));
         gamma_from_cube(&lc, &cells, &got);
         census(&got, t);
-        ledger_line(&got, &scratch);
+        ledger_line(&got, &scratch, game);
         while (t < ticks && !(seconds > 0 && busy_s >= seconds)) {
-            unsigned long long n = every - t % every;
-            if (n > ticks - t)
-                n = ticks - t;
-            busy_s += par_cube_run(&jc, &lc, k, ids, idle, n, NULL);
-            run += n;
-            t += n;
+            /* every census at clock 241 once batches are a day or longer (t = 177 after the soup
+               is clock 241), so that the 16 ticks of the ledger hold a round's end and midnight */
+            unsigned long long end = t + every, t0 = t;
+            if (every >= 256)
+                end += (177 + 256 - end % 256) % 256;
+            if (end > ticks)
+                end = ticks;
+            busy_s += run_to(&jc, &lc, &cells, k, ids, idle, &nd, &t, end);
+            run += t - t0;
             gamma_from_cube(&lc, &cells, &got);
             census(&got, t);
-            ledger_line(&got, &scratch);
+            ledger_line(&got, &scratch, game);
         }
         if (show)
             print_slice(&got);

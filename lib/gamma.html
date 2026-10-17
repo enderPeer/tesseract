@@ -5,8 +5,8 @@
 <title>gamma</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-/* The live view of gamma, served by "alpha gamma --serve PORT" (docs/GAMMA.md, step 11e). One
-   file, nothing loaded from anywhere else, so it works offline. */
+/* The live view of gamma, served by "alpha gamma --serve PORT" (docs/GAMMA.md, steps 11e and
+   11f). One file, nothing loaded from anywhere else, so it works offline. */
 :root {
     --bg: #111114; --panel: #1a1a1f; --line: #2c2c33; --text: #d8d8dc; --dim: #8a8a92;
     --accent: #e8c86a;
@@ -24,6 +24,8 @@ header {
 header h1 { font-size: 16px; font-weight: normal; margin: 0 8px 0 0; color: var(--accent); }
 header .stat b { color: #fff; font-weight: normal; }
 header .stat { color: var(--dim); white-space: nowrap; }
+header .stat .pred { color: #e8453a; }
+header .stat.game[hidden] { display: none; }
 header button {
     background: #26262d; color: var(--text); border: 1px solid #3a3a44; border-radius: 4px;
     padding: 3px 10px; font: inherit; cursor: pointer;
@@ -73,6 +75,10 @@ aside h2 { font-size: 12px; font-weight: normal; color: var(--dim); margin: 4px 
     <span class="stat">dividing <b id="busy">?</b></span>
     <span class="stat">genomes <b id="genomes">?</b></span>
     <span class="stat"><b id="tps">?</b> ticks/s</span>
+    <span class="stat game">need <b id="need">?</b></span>
+    <span class="stat game">below it <b id="below">?</b></span>
+    <span class="stat game">hiding <b id="hiding">?</b></span>
+    <span class="stat game"><span class="pred">&#9632;</span> predators <b id="preds">?</b></span>
     <button id="pauseBtn">pause</button>
     <button id="step1Btn">step 1</button>
     <button id="step100Btn">step 100</button>
@@ -97,30 +103,40 @@ aside h2 { font-size: 12px; font-weight: normal; color: var(--dim); margin: 4px 
 'use strict';
 
 /* The frame, as GET /frame sends it, little-endian. The byte offsets this page relies on:
-     0   "GAMA"           4  u32 version (1)       8  u64 tick (two u32, the low one first)
+     0   "GAMA"           4  u32 version (2)       8  u64 tick (two u32, the low one first)
     16   u8 xbits        17  u8 ybits             18  u8 zbits        19  u8 clock
     20   u32 cells       24  u32 busy (dividing)  28  u32 genomes     32  u32 ticks per second
-    36   u8 paused       37  3 bytes of 0
+    36   u8 paused       37  u8 need              38  2 bytes of 0
     40   26 x u32: the cells of the 26 most common genomes, A .. Z
-   144   n x (u8 class, u8 energy), n = 2^(xbits + ybits + zbits), x fastest, then y, then z
-   144 + 2 n   Z x (u8 light, u8 minerals): the averages of each layer, z = 0 first
-   class: 0 empty, 1 .. 26 a cell of genome A .. Z, 27 another genome, 28 a cell being born. */
+   144   u32 predators  148  u32 cells below the need  152  u32 cells hiding  156  u32 0
+   160   n x (u8 class, u8 energy), n = 2^(xbits + ybits + zbits), x fastest, then y, then z
+   160 + 2 n   Z x (u8 light, u8 minerals): the averages of each layer, z = 0 first
+   class: bits 0-4: 0 empty, 1 .. 26 a cell of genome A .. Z, 27 another genome, 28 a cell being
+   born; bit 6: the cell hides; bit 7: a predator is in the voxel. Version 1 (step 11e) had none
+   of the game: no need, nothing at 144 .. 159, the voxels at 144. */
 const AT = {version: 4, tick: 8, xbits: 16, ybits: 17, zbits: 18, clock: 19, cells: 20, busy: 24,
-            genomes: 28, tps: 32, paused: 36, counts: 40, voxels: 144};
-const CLASS_OTHER = 27, CLASS_BORN = 28, CLASSES = 29;
+            genomes: 28, tps: 32, paused: 36, need: 37, counts: 40, preds: 144, below: 148,
+            hiding: 152, voxels: 160, voxels1: 144};
+const CLASS_OTHER = 27, CLASS_BORN = 28, CLASSES = 29, CLASS_MASK = 31, HIDING = 64, PREDATOR = 128;
 const POLL_MS = 150;
 
 function parseFrame(buffer) {
     const dv = new DataView(buffer), u8 = new Uint8Array(buffer);
     if (buffer.byteLength < AT.voxels || String.fromCharCode(u8[0], u8[1], u8[2], u8[3]) !== 'GAMA')
         throw new Error('not a frame');
+    const version = dv.getUint32(AT.version, true), game = version >= 2;
+    const voxels = game ? AT.voxels : AT.voxels1;
+    if (buffer.byteLength < voxels)
+        throw new Error('frame too short: ' + buffer.byteLength + ' bytes');
     const f = {
-        version: dv.getUint32(AT.version, true),
+        version, game,
         tick: dv.getUint32(AT.tick, true) + dv.getUint32(AT.tick + 4, true) * 4294967296,
         xbits: u8[AT.xbits], ybits: u8[AT.ybits], zbits: u8[AT.zbits], clock: u8[AT.clock],
         cells: dv.getUint32(AT.cells, true), busy: dv.getUint32(AT.busy, true),
         genomes: dv.getUint32(AT.genomes, true), tps: dv.getUint32(AT.tps, true),
-        paused: u8[AT.paused] !== 0, counts: [], light: [], minerals: []
+        paused: u8[AT.paused] !== 0, counts: [], light: [], minerals: [],
+        need: game ? u8[AT.need] : 0, preds: game ? dv.getUint32(AT.preds, true) : 0,
+        below: game ? dv.getUint32(AT.below, true) : 0, hiding: game ? dv.getUint32(AT.hiding, true) : 0
     };
     f.X = 1 << f.xbits;
     f.Y = 1 << f.ybits;
@@ -128,10 +144,10 @@ function parseFrame(buffer) {
     f.n = f.X * f.Y * f.Z;
     for (let i = 0; i < 26; i++)
         f.counts.push(dv.getUint32(AT.counts + 4 * i, true));
-    const layers = AT.voxels + 2 * f.n;
+    const layers = voxels + 2 * f.n;
     if (buffer.byteLength < layers + 2 * f.Z)
         throw new Error('frame too short: ' + buffer.byteLength + ' bytes');
-    f.voxels = u8.subarray(AT.voxels, layers);
+    f.voxels = u8.subarray(voxels, layers);
     for (let z = 0; z < f.Z; z++) {
         f.light.push(u8[layers + 2 * z]);
         f.minerals.push(u8[layers + 2 * z + 1]);
@@ -195,6 +211,15 @@ function updateHeader(f) {
     $('genomes').textContent = f.genomes.toLocaleString();
     $('tps').textContent = f.paused ? 'paused, 0' : f.tps.toLocaleString();
     pauseBtn.textContent = f.paused ? 'resume' : 'pause';
+    const on = f.game && (f.need > 0 || f.preds > 0);  /* the social game (11f) is being played */
+    for (const el of document.querySelectorAll('header .stat.game'))
+        el.hidden = !on;
+    if (on) {
+        $('need').textContent = f.need + ' of 16 rounds';
+        $('below').textContent = f.below.toLocaleString();
+        $('hiding').textContent = f.hiding.toLocaleString();
+        $('preds').textContent = f.preds.toLocaleString();
+    }
 }
 
 const legendEntries = [];  /* per class: {entry, count} */
@@ -274,8 +299,8 @@ function onFrame(f) {
     if (!frame)
         fitCamera(f);  /* once, at the first frame */
     frame = f;
-    if (f.version !== 1)
-        setStatus('frame version ' + f.version + ', this page expects 1', true);
+    if (f.version !== 1 && f.version !== 2)
+        setStatus('frame version ' + f.version + ', this page knows 1 and 2', true);
     updateHeader(f);
     buildInstances(f);
     updateLegend(f);
@@ -356,9 +381,12 @@ document.addEventListener('keyup', e => {
 
 /* Per instance, 9 floats: the offset (GL x, y, z), the colour (r, g, b) and the pick colour
    (the instance's number + 1 as three bytes, so that 0 is the background). The world's axes on
-   screen: x to the right, z downward, y into the depth; the cube is centred on the origin. */
-const STRIDE = 9;
+   screen: x to the right, z downward, y into the depth; the cube is centred on the origin. The
+   predators are a second set, bigger and red, drawn around whatever is in their voxel and never
+   picked. A cell that hides is drawn dark. */
+const STRIDE = 9, PRED_COLOUR = [0.92, 0.2, 0.15];
 let instances = null, instanceVoxel = null, instanceCount = 0, instancesDirty = false;
+let predInstances = null, predCount = 0, predDirty = false;
 let needsDraw = true;
 
 function offsetOf(f, x, y, z) {
@@ -369,13 +397,21 @@ function buildInstances(f) {
     if (!instances || instances.length < f.n * STRIDE) {
         instances = new Float32Array(f.n * STRIDE);
         instanceVoxel = new Uint32Array(f.n);
+        predInstances = new Float32Array(f.n * STRIDE);
     }
     classCount.fill(0);
-    let k = 0, v = 0;
+    let k = 0, v = 0, q = 0;
     for (let z = 0; z < f.Z; z++) {
         for (let y = 0; y < f.Y; y++) {
             for (let x = 0; x < f.X; x++, v++) {
-                const cls = f.voxels[2 * v];
+                const byte = f.version >= 2 ? f.voxels[2 * v] : f.voxels[2 * v] & CLASS_MASK;
+                const cls = byte & CLASS_MASK;
+                if (byte & PREDATOR) {
+                    const o = offsetOf(f, x, y, z), b = q * STRIDE;
+                    predInstances.set([o[0], o[1], o[2], PRED_COLOUR[0], PRED_COLOUR[1],
+                                       PRED_COLOUR[2], 0, 0, 0], b);
+                    q++;
+                }
                 if (cls === 0)
                     continue;
                 classCount[cls < CLASSES ? cls : CLASS_OTHER]++;
@@ -383,6 +419,8 @@ function buildInstances(f) {
                 let bright = 0.35 + 0.65 * f.voxels[2 * v + 1] / 255;
                 if (highlighted && cls !== highlighted)
                     bright *= 0.18;
+                if (byte & HIDING)
+                    bright *= 0.3;
                 if (v === picked)
                     bright = 1.3;
                 const o = offsetOf(f, x, y, z), id = k + 1, b = k * STRIDE;
@@ -402,6 +440,8 @@ function buildInstances(f) {
     }
     instanceCount = k;
     instancesDirty = true;
+    predCount = q;
+    predDirty = true;
     needsDraw = true;
 }
 
@@ -592,7 +632,7 @@ function cubeEdges() {
     return new Float32Array(out);
 }
 
-let cubeProg, flatProg, meshBuf, edgeBuf, instanceBuf;
+let cubeProg, flatProg, meshBuf, edgeBuf, instanceBuf, predBuf;
 const pick = {fb: null, width: 0, height: 0};
 
 function initGL() {
@@ -605,6 +645,7 @@ function initGL() {
     gl.bindBuffer(gl.ARRAY_BUFFER, edgeBuf);
     gl.bufferData(gl.ARRAY_BUFFER, cubeEdges(), gl.STATIC_DRAW);
     instanceBuf = gl.createBuffer();
+    predBuf = gl.createBuffer();
     gl.enable(gl.DEPTH_TEST);
 }
 
@@ -634,20 +675,24 @@ function ensurePickBuffer() {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
 
-function drawCubes(m, picking) {
+/* the cells (or, with preds, the predators: bigger, from their own buffer) */
+function drawCubes(m, picking, preds) {
     const p = cubeProg;
     gl.useProgram(p.program);
     gl.uniformMatrix4fv(p.u_proj, false, m.proj);
     gl.uniformMatrix4fv(p.u_view, false, m.view);
-    gl.uniform1f(p.u_half, 0.42);
+    gl.uniform1f(p.u_half, preds ? 0.5 : 0.42);
     gl.uniform1f(p.u_pick, picking ? 1 : 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, meshBuf);
     gl.enableVertexAttribArray(p.a_position);
     gl.vertexAttribPointer(p.a_position, 3, gl.FLOAT, false, 24, 0);
     gl.enableVertexAttribArray(p.a_normal);
     gl.vertexAttribPointer(p.a_normal, 3, gl.FLOAT, false, 24, 12);
-    gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuf);
-    if (instancesDirty) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, preds ? predBuf : instanceBuf);
+    if (preds && predDirty) {
+        gl.bufferData(gl.ARRAY_BUFFER, predInstances.subarray(0, predCount * STRIDE), gl.DYNAMIC_DRAW);
+        predDirty = false;
+    } else if (!preds && instancesDirty) {
         gl.bufferData(gl.ARRAY_BUFFER, instances.subarray(0, instanceCount * STRIDE), gl.DYNAMIC_DRAW);
         instancesDirty = false;
     }
@@ -656,7 +701,7 @@ function drawCubes(m, picking) {
         gl.vertexAttribPointer(p[name], 3, gl.FLOAT, false, STRIDE * 4, offset);
         instancing.divisor(p[name], 1);
     }
-    instancing.draw(gl.TRIANGLES, 0, 36, instanceCount);
+    instancing.draw(gl.TRIANGLES, 0, 36, preds ? predCount : instanceCount);
     for (const name of ['a_offset', 'a_colour', 'a_pick']) {
         instancing.divisor(p[name], 0);
         gl.disableVertexAttribArray(p[name]);
@@ -696,7 +741,9 @@ function draw() {
     const f = frame, m = cameraMatrices(), hx = f.X / 2, hy = f.Y / 2, hz = f.Z / 2;
     drawFlat(m, gl.TRIANGLES, [hx, 0.05, hy], [0, -hz, 0], [0.13, 0.13, 0.16, 1]);  /* the floor */
     drawFlat(m, gl.LINES, [hx, hz, hy], [0, 0, 0], [0.3, 0.3, 0.36, 1]);  /* the world's box */
-    drawCubes(m, false);
+    drawCubes(m, false, false);
+    if (predCount > 0)
+        drawCubes(m, false, true);
     if (picked >= 0) {
         const x = picked & (f.X - 1), y = picked >> f.xbits & (f.Y - 1), z = picked >> (f.xbits + f.ybits);
         drawFlat(m, gl.LINES, [0.6, 0.6, 0.6], offsetOf(f, x, y, z), [1, 1, 1, 1]);
@@ -718,7 +765,7 @@ function pickAt(px, py) {
     gl.viewport(0, 0, pick.width, pick.height);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    drawCubes(cameraMatrices(), true);
+    drawCubes(cameraMatrices(), true, false);
     const rgba = new Uint8Array(4);
     gl.readPixels(px, py, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);

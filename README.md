@@ -89,6 +89,8 @@ bin/alpha gamma                                   gamma: a 32 x 32 x 32 world of
 bin/alpha gamma --ticks 1000000 --show            a million ticks of evolution; a slice at the end
 bin/alpha gamma --serve 8765                      the world live in the browser at
                                                   http://127.0.0.1:8765/; click a cell for its circuit
+bin/alpha gamma --need 12 --ramp 16 --predators 256   the social game: cells that must talk to
+                                                  live, and predators only a warning escapes
 
 bin/alpha super "RR = RR ^ x"                     the shortest NAND/STO program, proven (7 here)
 bin/alpha super "s{a,b} = a ^ b ^ c; c = a&b | a&c | b&c"   a full adder: 19, nothing shorter
