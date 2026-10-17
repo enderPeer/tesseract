@@ -87,6 +87,8 @@ bin/alpha beta bench                              beta steps per second, 1 and a
 bin/alpha gamma                                   gamma: a 32 x 32 x 32 world of cells from a random
                                                   soup, checked against plain C, then a census
 bin/alpha gamma --ticks 1000000 --show            a million ticks of evolution; a slice at the end
+bin/alpha gamma --serve 8765                      the world live in the browser at
+                                                  http://127.0.0.1:8765/; click a cell for its circuit
 
 bin/alpha super "RR = RR ^ x"                     the shortest NAND/STO program, proven (7 here)
 bin/alpha super "s{a,b} = a ^ b ^ c; c = a&b | a&c | b&c"   a full adder: 19, nothing shorter
@@ -154,6 +156,8 @@ src/betacmd.c    alpha beta: asm, monitor, run, bench
 src/gamma.c      gamma: the world and its cells in plain C, and as one NAND/STO program for the
                  cube
 src/gammacmd.c   alpha gamma: the soup, the check against plain C, the run with a census
+src/gammaserve.c the live view's server: HTTP on 127.0.0.1 only, Winsock or BSD sockets
+lib/gamma.html   the live view: the cube in WebGL, one file, nothing loaded from anywhere
 src/super.c      the superoptimizer: shortest programs for a specification, with the proof
 src/supercmd.c   alpha super, and the library's building blocks as specifications
 src/platform.c   timer, CPU topology, pinning, priority, threads (Windows and Linux)

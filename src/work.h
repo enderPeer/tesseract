@@ -15,7 +15,7 @@ int  cmd_beta(int argc, char **argv);
 /* alpha super (src/supercmd.c): the superoptimizer */
 int  cmd_super(int argc, char **argv);
 
-/* alpha gamma (src/gammacmd.c): the world of step 11 */
-int  cmd_gamma(int argc, char **argv);
+/* alpha gamma (src/gammacmd.c): the world of step 11; argv0 finds lib/gamma.html for --serve */
+int  cmd_gamma(const char *argv0, int argc, char **argv);
 
 #endif

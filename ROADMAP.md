@@ -22,11 +22,11 @@ a small LAN cluster of four Ubuntu machines; yours will differ.
 | 8 | Toward an operating system | 8a ✅ 8b ✅ 8c ⬜ | beta, a byte computer with a monitor: 16,384 of them, 1.3 × 10^9 instructions/s |
 | 9 | Real 1-bit hardware (FPGA) | ⬜ | |
 | 10 | Superoptimizer | ✅ | every library building block provably shortest; full adder 28 → 19, sort 2× faster |
-| 11 | Gamma: a world of cells on the cube | 11a ✅ 11b ✅ 11c ✅ 11d ✅ 11e–11g ⬜ | cells that are NAND circuits evolve from a random soup, divide, feed each other, and live under day and night, manna, a term and the lot; ~11,000 ticks/s for 32,768 voxels |
+| 11 | Gamma: a world of cells on the cube | 11a ✅ 11b ✅ 11c ✅ 11d ✅ 11e ✅ 11f–11h ⬜ | cells that are NAND circuits evolve from a random soup, divide, feed each other, and live under day and night, manna, a term and the lot; ~11,000 ticks/s for 32,768 voxels |
 | – | ~~Control flow with lane masks~~ | parked | needs a new instruction (see the end) |
 
 **Open:** gamma's ecology (the floor knows no weather and holds 60 % of the cells: see 11d) and
-11e (a live view), 10 (optimize for the compiler's cost, not only the length), 7g (one cube across
+11f (the social game), 10 (optimize for the compiler's cost, not only the length), 7g (one cube across
 the cluster), 5c (AVX-512), 8c (more memory, networked betas), 9 (FPGA).
 
 ## 1. Reference machine ✅
@@ -1092,11 +1092,39 @@ Next: the floor. Minerals know no day and the floor zone sits at the cap; a seas
 minerals, or a finite floor that must rest (Leviticus 25:4), would give the weather the other half
 of the world. And the live view.
 
-### 11e–11g ⬜
+### 11e. The live view ✅
 
-- 11e `alpha gamma --serve`: a live page of the cube; click a cell to see its circuit.
-- 11f the twin world across the 16th dimension: butterfly and control modes.
-- 11g AVX-512 (5c), the world across the cluster (7g).
+`alpha gamma --serve PORT` runs the world as before up to the check against plain C, then serves
+it at `http://127.0.0.1:PORT/` instead of printing a census: a batch of `--every` ticks (500 by
+default) on the cube, the world read back, every waiting request answered, again. The server
+([src/gammaserve.c](src/gammaserve.c)) is plain C, Winsock or BSD sockets, HTTP/1.0, one request
+at a time, bound to 127.0.0.1 only (checked: the node's LAN address refuses), and never changes
+the world. Routes: `/` the page ([lib/gamma.html](lib/gamma.html), read from disk on every
+request), `/frame` the world in binary (a 144-byte header with the tick, clock, counts and the 26
+most common genomes, then 2 bytes per voxel, its class and energy, then the light and minerals of
+each layer: 65,744 bytes for 32 × 32 × 32), `/cell?v=N` one voxel as text with the cell's
+circuit as `--genes` prints it, and `/pause`, `/resume`, `/step?n=K`.
+
+The page is one file with nothing loaded from anywhere: WebGL with instanced cubes, a colour per
+genome (A–Z as the census letters them), brightness by energy, the sun plane following the clock,
+an orbit camera, picking by an offscreen buffer of instance ids, the clicked cell's circuit in a
+side panel, the legend (click a letter to dim the others), a strip of light and minerals by
+layer, and pause and step. A world served from a cluster node is watched here through
+`ssh -L PORT:127.0.0.1:PORT node`; serving costs about a tenth of the ticks (9,300 ticks/s on
+16 threads of the i9-12900K).
+
+Done: built from a written contract by two implementers (the server and the page) in parallel;
+the integration test on a node checked every route, the frame byte for byte against the world
+(class counts, the letters' counts, layer averages), pause/step/resume and the 404s; the whole
+suite unchanged (`test_gamma` 75 checks). Fixed from the reviews: on Windows the port is held
+exclusively (`SO_REUSEADDR` there would let a second server share it), GET only, the left mouse
+button only.
+
+### 11f–11h ⬜
+
+- 11f the social game: communication as the key to staying alive (in progress).
+- 11g the twin world across the 16th dimension: butterfly and control modes.
+- 11h AVX-512 (5c), the world across the cluster (7g).
 
 Details in [docs/GAMMA.md](docs/GAMMA.md).
 

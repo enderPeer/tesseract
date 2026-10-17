@@ -40,6 +40,8 @@ void work_usage(void)
           "  alpha gamma [--size X,Y,Z] [--show]     gamma, a 3-D world of cells on the cube that\n"
           "                                          evolve from a random soup; checked against\n"
           "                                          plain C, then run with a census\n"
+          "  alpha gamma --serve PORT                the same, watched live in the browser at\n"
+          "                                          http://127.0.0.1:PORT/\n"
           "\n"
           "Programs may be .asm or .bench files. verify, equiv and search take --ticks T,\n"
           "--threads N, --exclude LIST, --idle, and for the cluster --part I/K with --raw, and\n"
@@ -724,6 +726,6 @@ int work_main(int argc, char **argv)
     if (!strcmp(c, "super"))
         return cmd_super(argc - 2, argv + 2);
     if (!strcmp(c, "gamma"))
-        return cmd_gamma(argc - 2, argv + 2);
+        return cmd_gamma(argv[0], argc - 2, argv + 2);
     return -1;
 }

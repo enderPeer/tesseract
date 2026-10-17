@@ -23,20 +23,20 @@ set CFLAGS=/nologo /std:c11 /O2 /W4 /D_CRT_SECURE_NO_WARNINGS /Fo:build\
 rem Only the lane engine is compiled for AVX2, so everything else still runs on any x64 CPU
 rem and can check for AVX2 before using it.
 cl %CFLAGS% /arch:AVX2 /c src\lanes.c || exit /b 1
-set CORE=src\asm.c src\ref.c src\check.c src\platform.c src\x86.c src\jit.c src\parallel.c src\tester.c src\build.c src\net.c src\gen.c src\spec.c src\enum.c src\work.c src\benes.c src\cubedemo.c src\beta.c src\betacmd.c src\super.c src\supercmd.c src\gamma.c src\gammacmd.c build\lanes.obj
+set CORE=src\asm.c src\ref.c src\check.c src\platform.c src\x86.c src\jit.c src\parallel.c src\tester.c src\build.c src\net.c src\gen.c src\spec.c src\enum.c src\work.c src\benes.c src\cubedemo.c src\beta.c src\betacmd.c src\super.c src\supercmd.c src\gamma.c src\gammacmd.c src\gammaserve.c build\lanes.obj
 
-cl %CFLAGS% src\main.c %CORE% /Fe:bin\alpha.exe || exit /b 1
+cl %CFLAGS% src\main.c %CORE% ws2_32.lib /Fe:bin\alpha.exe || exit /b 1
 
 if /i not "%~1"=="test" exit /b 0
-cl %CFLAGS% /Isrc tests\test_ref.c %CORE% /Fe:bin\test_ref.exe || exit /b 1
-cl %CFLAGS% /Isrc tests\test_lanes.c %CORE% /Fe:bin\test_lanes.exe || exit /b 1
-cl %CFLAGS% /Isrc tests\test_jit.c %CORE% /Fe:bin\test_jit.exe || exit /b 1
-cl %CFLAGS% /Isrc tests\test_tester.c %CORE% /Fe:bin\test_tester.exe || exit /b 1
-cl %CFLAGS% /Isrc tests\test_work.c %CORE% /Fe:bin\test_work.exe || exit /b 1
-cl %CFLAGS% /Isrc tests\test_cube.c %CORE% /Fe:bin\test_cube.exe || exit /b 1
-cl %CFLAGS% /Isrc tests\test_beta.c %CORE% /Fe:bin\test_beta.exe || exit /b 1
-cl %CFLAGS% /Isrc tests\test_super.c %CORE% /Fe:bin\test_super.exe || exit /b 1
-cl %CFLAGS% /Isrc tests\test_gamma.c %CORE% /Fe:bin\test_gamma.exe || exit /b 1
+cl %CFLAGS% /Isrc tests\test_ref.c %CORE% ws2_32.lib /Fe:bin\test_ref.exe || exit /b 1
+cl %CFLAGS% /Isrc tests\test_lanes.c %CORE% ws2_32.lib /Fe:bin\test_lanes.exe || exit /b 1
+cl %CFLAGS% /Isrc tests\test_jit.c %CORE% ws2_32.lib /Fe:bin\test_jit.exe || exit /b 1
+cl %CFLAGS% /Isrc tests\test_tester.c %CORE% ws2_32.lib /Fe:bin\test_tester.exe || exit /b 1
+cl %CFLAGS% /Isrc tests\test_work.c %CORE% ws2_32.lib /Fe:bin\test_work.exe || exit /b 1
+cl %CFLAGS% /Isrc tests\test_cube.c %CORE% ws2_32.lib /Fe:bin\test_cube.exe || exit /b 1
+cl %CFLAGS% /Isrc tests\test_beta.c %CORE% ws2_32.lib /Fe:bin\test_beta.exe || exit /b 1
+cl %CFLAGS% /Isrc tests\test_super.c %CORE% ws2_32.lib /Fe:bin\test_super.exe || exit /b 1
+cl %CFLAGS% /Isrc tests\test_gamma.c %CORE% ws2_32.lib /Fe:bin\test_gamma.exe || exit /b 1
 bin\test_ref.exe || exit /b 1
 bin\test_lanes.exe || exit /b 1
 bin\test_jit.exe || exit /b 1

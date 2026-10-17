@@ -14,7 +14,7 @@ mkdir -p bin build
 $CC $CFLAGS -mavx2 -c src/lanes.c -o build/lanes.o
 CORE="src/asm.c src/ref.c src/check.c src/platform.c src/x86.c src/jit.c src/parallel.c src/tester.c
       src/build.c src/net.c src/gen.c src/spec.c src/enum.c src/work.c src/benes.c src/cubedemo.c
-      src/beta.c src/betacmd.c src/super.c src/supercmd.c src/gamma.c src/gammacmd.c
+      src/beta.c src/betacmd.c src/super.c src/supercmd.c src/gamma.c src/gammacmd.c src/gammaserve.c
       build/lanes.o"
 
 $CC $CFLAGS src/main.c $CORE -o bin/alpha -pthread

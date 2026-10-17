@@ -178,6 +178,7 @@ numbers side by side with 11c.
 | 11b | cells: genome, senses, division with mutation, energy, death; evolution from a random soup | ✅ |
 | 11c | bodies: energy given from cell to cell, and asking, granting and being born in one tick | ✅ |
 | 11d | weather, from the three books: day and night, manna, an appointed term, the lot, the measure | ✅ |
-| 11e | `alpha gamma --serve`: a page that draws the cube live; click a cell to see its circuit | ⬜ |
-| 11f | the twin world across the 16th dimension: butterfly and control modes | ⬜ |
-| 11g | AVX-512 (5c), the world across the cluster (7g) | ⬜ |
+| 11e | `alpha gamma --serve`: a page that draws the cube live; click a cell to see its circuit | ✅ |
+| 11f | the social game: a reward only communication earns, predators only communication escapes | ⬜ |
+| 11g | the twin world across the 16th dimension: butterfly and control modes | ⬜ |
+| 11h | AVX-512 (5c), the world across the cluster (7g) | ⬜ |

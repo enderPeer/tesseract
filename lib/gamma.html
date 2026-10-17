@@ -1,0 +1,789 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>gamma</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+/* The live view of gamma, served by "alpha gamma --serve PORT" (docs/GAMMA.md, step 11e). One
+   file, nothing loaded from anywhere else, so it works offline. */
+:root {
+    --bg: #111114; --panel: #1a1a1f; --line: #2c2c33; --text: #d8d8dc; --dim: #8a8a92;
+    --accent: #e8c86a;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+    background: var(--bg); color: var(--text); display: flex; flex-direction: column;
+    font: 14px ui-monospace, Consolas, "DejaVu Sans Mono", Menlo, monospace;
+}
+header {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; padding: 8px 14px;
+    border-bottom: 1px solid var(--line); background: var(--panel);
+}
+header h1 { font-size: 16px; font-weight: normal; margin: 0 8px 0 0; color: var(--accent); }
+header .stat b { color: #fff; font-weight: normal; }
+header .stat { color: var(--dim); white-space: nowrap; }
+header button {
+    background: #26262d; color: var(--text); border: 1px solid #3a3a44; border-radius: 4px;
+    padding: 3px 10px; font: inherit; cursor: pointer;
+}
+header button:hover { background: #33333c; }
+#status { color: var(--dim); font-size: 12px; }
+#status.bad { color: #e07a6a; }
+main { flex: 1; display: flex; min-height: 0; }
+#view { flex: 1; position: relative; min-width: 0; }
+#world { width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
+#noGL {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    padding: 24px; text-align: center; color: var(--dim);
+}
+#noGL[hidden] { display: none; }
+aside {
+    width: 330px; display: flex; flex-direction: column; gap: 8px; padding: 8px; overflow-y: auto;
+    border-left: 1px solid var(--line); background: var(--panel);
+}
+aside h2 { font-size: 12px; font-weight: normal; color: var(--dim); margin: 4px 0; }
+#legend { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 10px; }
+#legend .entry {
+    display: flex; align-items: center; gap: 6px; padding: 1px 4px; border-radius: 3px;
+    cursor: pointer; user-select: none;
+}
+#legend .entry:hover { background: #26262d; }
+#legend .entry.on { background: #34343e; outline: 1px solid #55556a; }
+#legend .entry.empty { opacity: 0.35; }
+#legend .chip { width: 12px; height: 12px; border-radius: 2px; flex: none; }
+#legend .letter { width: 4ch; }
+#legend .count { color: var(--dim); margin-left: auto; }
+#strip { display: block; width: 100%; }
+#cell {
+    margin: 0; padding: 6px; background: var(--bg); border: 1px solid var(--line);
+    border-radius: 4px; white-space: pre; overflow: auto; font-size: 12px; line-height: 1.35;
+    min-height: 120px; flex: 1;
+}
+</style>
+</head>
+<body>
+<header>
+    <h1>gamma</h1>
+    <span class="stat">world <b id="size">?</b></span>
+    <span class="stat">tick <b id="tick">?</b></span>
+    <span class="stat">time <b id="time">?</b></span>
+    <span class="stat">cells <b id="cells">?</b></span>
+    <span class="stat">dividing <b id="busy">?</b></span>
+    <span class="stat">genomes <b id="genomes">?</b></span>
+    <span class="stat"><b id="tps">?</b> ticks/s</span>
+    <button id="pauseBtn">pause</button>
+    <button id="step1Btn">step 1</button>
+    <button id="step100Btn">step 100</button>
+    <span id="status"></span>
+</header>
+<main>
+    <div id="view">
+        <canvas id="world"></canvas>
+        <div id="noGL" hidden>WebGL is not available in this browser, so the cube is not drawn;
+            the numbers above and the layers on the right still are.</div>
+    </div>
+    <aside>
+        <h2>genomes (click one to highlight it)</h2>
+        <div id="legend"></div>
+        <h2>light and minerals by layer, z = 0 (the sun) at the top</h2>
+        <canvas id="strip" width="314" height="200"></canvas>
+        <h2>the picked voxel (click a cube)</h2>
+        <pre id="cell">nothing picked</pre>
+    </aside>
+</main>
+<script>
+'use strict';
+
+/* The frame, as GET /frame sends it, little-endian. The byte offsets this page relies on:
+     0   "GAMA"           4  u32 version (1)       8  u64 tick (two u32, the low one first)
+    16   u8 xbits        17  u8 ybits             18  u8 zbits        19  u8 clock
+    20   u32 cells       24  u32 busy (dividing)  28  u32 genomes     32  u32 ticks per second
+    36   u8 paused       37  3 bytes of 0
+    40   26 x u32: the cells of the 26 most common genomes, A .. Z
+   144   n x (u8 class, u8 energy), n = 2^(xbits + ybits + zbits), x fastest, then y, then z
+   144 + 2 n   Z x (u8 light, u8 minerals): the averages of each layer, z = 0 first
+   class: 0 empty, 1 .. 26 a cell of genome A .. Z, 27 another genome, 28 a cell being born. */
+const AT = {version: 4, tick: 8, xbits: 16, ybits: 17, zbits: 18, clock: 19, cells: 20, busy: 24,
+            genomes: 28, tps: 32, paused: 36, counts: 40, voxels: 144};
+const CLASS_OTHER = 27, CLASS_BORN = 28, CLASSES = 29;
+const POLL_MS = 150;
+
+function parseFrame(buffer) {
+    const dv = new DataView(buffer), u8 = new Uint8Array(buffer);
+    if (buffer.byteLength < AT.voxels || String.fromCharCode(u8[0], u8[1], u8[2], u8[3]) !== 'GAMA')
+        throw new Error('not a frame');
+    const f = {
+        version: dv.getUint32(AT.version, true),
+        tick: dv.getUint32(AT.tick, true) + dv.getUint32(AT.tick + 4, true) * 4294967296,
+        xbits: u8[AT.xbits], ybits: u8[AT.ybits], zbits: u8[AT.zbits], clock: u8[AT.clock],
+        cells: dv.getUint32(AT.cells, true), busy: dv.getUint32(AT.busy, true),
+        genomes: dv.getUint32(AT.genomes, true), tps: dv.getUint32(AT.tps, true),
+        paused: u8[AT.paused] !== 0, counts: [], light: [], minerals: []
+    };
+    f.X = 1 << f.xbits;
+    f.Y = 1 << f.ybits;
+    f.Z = 1 << f.zbits;
+    f.n = f.X * f.Y * f.Z;
+    for (let i = 0; i < 26; i++)
+        f.counts.push(dv.getUint32(AT.counts + 4 * i, true));
+    const layers = AT.voxels + 2 * f.n;
+    if (buffer.byteLength < layers + 2 * f.Z)
+        throw new Error('frame too short: ' + buffer.byteLength + ' bytes');
+    f.voxels = u8.subarray(AT.voxels, layers);
+    for (let z = 0; z < f.Z; z++) {
+        f.light.push(u8[layers + 2 * z]);
+        f.minerals.push(u8[layers + 2 * z + 1]);
+    }
+    return f;
+}
+
+/* ---- the page's state ---------------------------------------------------------------------- */
+
+let frame = null;           /* the latest frame */
+let picked = -1;            /* the voxel the user clicked, or -1 */
+let highlighted = 0;        /* a class 1 .. 26 the user picked in the legend, or 0 */
+const classCount = new Uint32Array(CLASSES);  /* cells per class in the latest frame */
+
+const $ = id => document.getElementById(id);
+const statusEl = $('status'), cellEl = $('cell'), pauseBtn = $('pauseBtn');
+
+function setStatus(text, bad) {
+    statusEl.textContent = text;
+    statusEl.className = bad ? 'bad' : '';
+}
+
+/* ---- colours ------------------------------------------------------------------------------ */
+
+function hslToRgb(h, s, l) {
+    const k = n => (n + h / 30) % 12;
+    const a = s * Math.min(l, 1 - l);
+    const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1));
+    return [f(0), f(8), f(4)];
+}
+
+/* 26 hues for A .. Z, seven steps apart around the circle so that neighbouring letters differ;
+   grey for any other genome, white for a cell being born */
+const classColour = new Array(CLASSES).fill([0, 0, 0]);
+for (let i = 1; i <= 26; i++)
+    classColour[i] = hslToRgb(((i - 1) * 7 % 26) * 360 / 26, 0.72, 0.56);
+classColour[CLASS_OTHER] = [0.58, 0.58, 0.6];
+classColour[CLASS_BORN] = [1, 1, 1];
+
+function cssColour(c) {
+    return 'rgb(' + Math.round(c[0] * 255) + ',' + Math.round(c[1] * 255) + ',' +
+           Math.round(c[2] * 255) + ')';
+}
+
+/* ---- the header and the legend ------------------------------------------------------------ */
+
+/* the clock as a time of day: 0 midnight, 64 sunrise, 128 noon, 192 sunset */
+function timeOfDay(clock) {
+    const minutes = Math.round(clock * 24 * 60 / 256);
+    const h = Math.floor(minutes / 60) % 24, m = minutes % 60;
+    const word = clock < 64 ? 'night' : clock < 128 ? 'morning' : clock < 192 ? 'afternoon' : 'night';
+    return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m + ' ' + word;
+}
+
+function updateHeader(f) {
+    $('size').textContent = f.X + ' x ' + f.Y + ' x ' + f.Z;
+    $('tick').textContent = f.tick.toLocaleString();
+    $('time').textContent = timeOfDay(f.clock) + ' (clock ' + f.clock + ')';
+    $('cells').textContent = f.cells.toLocaleString();
+    $('busy').textContent = f.busy.toLocaleString();
+    $('genomes').textContent = f.genomes.toLocaleString();
+    $('tps').textContent = f.paused ? 'paused, 0' : f.tps.toLocaleString();
+    pauseBtn.textContent = f.paused ? 'resume' : 'pause';
+}
+
+const legendEntries = [];  /* per class: {entry, count} */
+
+function buildLegend() {
+    const legend = $('legend');
+    for (let cls = 1; cls < CLASSES; cls++) {
+        const entry = document.createElement('div'), chip = document.createElement('span');
+        const letter = document.createElement('span'), count = document.createElement('span');
+        entry.className = 'entry';
+        chip.className = 'chip';
+        chip.style.background = cssColour(classColour[cls]);
+        letter.className = 'letter';
+        letter.textContent = cls <= 26 ? String.fromCharCode(64 + cls) : cls === CLASS_OTHER ? 'other' : 'born';
+        count.className = 'count';
+        entry.append(chip, letter, count);
+        if (cls <= 26)
+            entry.addEventListener('click', () => toggleHighlight(cls));
+        else
+            entry.style.cursor = 'default';
+        legend.appendChild(entry);
+        legendEntries[cls] = {entry, count};
+    }
+}
+
+/* A .. Z carry the census's counts (cells not being born); 'other' and 'born' what the voxels say. */
+function updateLegend(f) {
+    for (let cls = 1; cls < CLASSES; cls++) {
+        const n = cls <= 26 ? f.counts[cls - 1] : classCount[cls];
+        legendEntries[cls].count.textContent = n.toLocaleString();
+        legendEntries[cls].entry.classList.toggle('empty', n === 0);
+        legendEntries[cls].entry.classList.toggle('on', cls === highlighted);
+    }
+}
+
+function toggleHighlight(cls) {
+    highlighted = highlighted === cls ? 0 : cls;
+    if (frame) {
+        buildInstances(frame);
+        updateLegend(frame);
+    }
+}
+
+/* ---- the layer strip: a 2-D canvas with the light and the minerals of every layer ----------- */
+
+function drawStrip(f) {
+    const strip = $('strip'), ctx = strip.getContext('2d');
+    if (!ctx)
+        return;
+    const W = strip.width, top = 16, rowH = f.Z <= 32 ? 6 : f.Z <= 64 ? 3 : 2;
+    const colW = (W - 40) / 2, lightX = 30, mineralX = 30 + colW + 10;
+    if (strip.height !== top + f.Z * rowH)
+        strip.height = top + f.Z * rowH;
+    ctx.fillStyle = '#16161a';
+    ctx.fillRect(0, 0, W, strip.height);
+    ctx.font = '11px ui-monospace, Consolas, monospace';
+    ctx.fillStyle = '#8a8a92';
+    ctx.fillText('z', 4, 11);
+    ctx.fillText('light', lightX, 11);
+    ctx.fillText('minerals', mineralX, 11);
+    for (let z = 0; z < f.Z; z++) {
+        const y = top + z * rowH;
+        ctx.fillStyle = '#e8c86a';
+        ctx.fillRect(lightX, y, colW * f.light[z] / 255, rowH - 1);
+        ctx.fillStyle = '#6a9ee0';
+        ctx.fillRect(mineralX, y, colW * f.minerals[z] / 255, rowH - 1);
+        if (rowH >= 10 || z === 0 || z === f.Z - 1 || z % 8 === 0) {
+            ctx.fillStyle = '#8a8a92';
+            ctx.fillText(String(z), 4, y + Math.min(rowH, 11));
+        }
+    }
+}
+
+/* ---- the frames ---------------------------------------------------------------------------- */
+
+function onFrame(f) {
+    if (!frame)
+        fitCamera(f);  /* once, at the first frame */
+    frame = f;
+    if (f.version !== 1)
+        setStatus('frame version ' + f.version + ', this page expects 1', true);
+    updateHeader(f);
+    buildInstances(f);
+    updateLegend(f);
+    drawStrip(f);
+    if (picked >= 0)
+        fetchCell(picked);
+}
+
+let pollFailed = false;  /* the status shows a failed poll; cleared by the next good one only */
+
+async function poll() {
+    try {
+        const r = await fetch('/frame', {cache: 'no-store'});
+        if (!r.ok)
+            throw new Error('HTTP ' + r.status);
+        onFrame(parseFrame(await r.arrayBuffer()));
+        if (pollFailed) {
+            pollFailed = false;
+            setStatus('');
+        }
+    } catch (e) {
+        pollFailed = true;
+        setStatus('no frame: ' + e.message, true);
+    }
+    setTimeout(poll, POLL_MS);
+}
+
+/* The picked voxel's text from /cell; the panel follows the voxel while it stays picked. One
+   request at a time, and a late answer for a voxel no longer picked is dropped. */
+let cellInFlight = false;
+
+async function fetchCell(v) {
+    if (cellInFlight)
+        return;
+    cellInFlight = true;
+    try {
+        const r = await fetch('/cell?v=' + v, {cache: 'no-store'});
+        const text = await r.text();
+        if (v === picked)
+            cellEl.textContent = 'voxel ' + v + (r.ok ? '\n' : ': HTTP ' + r.status + '\n') + text;
+    } catch (e) {
+        if (v === picked)
+            cellEl.textContent = 'voxel ' + v + ': ' + e.message;
+    }
+    cellInFlight = false;
+}
+
+/* ---- the controls -------------------------------------------------------------------------- */
+
+async function command(path) {
+    try {
+        const r = await fetch(path, {cache: 'no-store'});
+        setStatus(path + ': ' + (await r.text()).trim(), !r.ok);
+    } catch (e) {
+        setStatus(path + ': ' + e.message, true);
+    }
+}
+
+function togglePause() {
+    command(frame && frame.paused ? '/resume' : '/pause');
+}
+
+pauseBtn.addEventListener('click', e => { togglePause(); e.currentTarget.blur(); });
+$('step1Btn').addEventListener('click', e => { command('/step?n=1'); e.currentTarget.blur(); });
+$('step100Btn').addEventListener('click', e => { command('/step?n=100'); e.currentTarget.blur(); });
+document.addEventListener('keydown', e => {
+    if (e.code === 'Space' && !e.repeat) {
+        e.preventDefault();
+        togglePause();
+    }
+});
+document.addEventListener('keyup', e => {
+    if (e.code === 'Space')
+        e.preventDefault();  /* so that a focused button is not pressed a second time */
+});
+
+/* ---- the instances: one small cube per occupied voxel --------------------------------------- */
+
+/* Per instance, 9 floats: the offset (GL x, y, z), the colour (r, g, b) and the pick colour
+   (the instance's number + 1 as three bytes, so that 0 is the background). The world's axes on
+   screen: x to the right, z downward, y into the depth; the cube is centred on the origin. */
+const STRIDE = 9;
+let instances = null, instanceVoxel = null, instanceCount = 0, instancesDirty = false;
+let needsDraw = true;
+
+function offsetOf(f, x, y, z) {
+    return [x + 0.5 - f.X / 2, f.Z / 2 - (z + 0.5), y + 0.5 - f.Y / 2];
+}
+
+function buildInstances(f) {
+    if (!instances || instances.length < f.n * STRIDE) {
+        instances = new Float32Array(f.n * STRIDE);
+        instanceVoxel = new Uint32Array(f.n);
+    }
+    classCount.fill(0);
+    let k = 0, v = 0;
+    for (let z = 0; z < f.Z; z++) {
+        for (let y = 0; y < f.Y; y++) {
+            for (let x = 0; x < f.X; x++, v++) {
+                const cls = f.voxels[2 * v];
+                if (cls === 0)
+                    continue;
+                classCount[cls < CLASSES ? cls : CLASS_OTHER]++;
+                const colour = classColour[cls < CLASSES ? cls : CLASS_OTHER];
+                let bright = 0.35 + 0.65 * f.voxels[2 * v + 1] / 255;
+                if (highlighted && cls !== highlighted)
+                    bright *= 0.18;
+                if (v === picked)
+                    bright = 1.3;
+                const o = offsetOf(f, x, y, z), id = k + 1, b = k * STRIDE;
+                instances[b] = o[0];
+                instances[b + 1] = o[1];
+                instances[b + 2] = o[2];
+                instances[b + 3] = colour[0] * bright;
+                instances[b + 4] = colour[1] * bright;
+                instances[b + 5] = colour[2] * bright;
+                instances[b + 6] = (id & 255) / 255;
+                instances[b + 7] = (id >> 8 & 255) / 255;
+                instances[b + 8] = (id >> 16 & 255) / 255;
+                instanceVoxel[k] = v;
+                k++;
+            }
+        }
+    }
+    instanceCount = k;
+    instancesDirty = true;
+    needsDraw = true;
+}
+
+/* ---- small matrices, column-major as WebGL wants them -------------------------------------- */
+
+function perspective(fovy, aspect, near, far) {
+    const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+    return new Float32Array([f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) * nf, -1, 0, 0,
+                             2 * far * near * nf, 0]);
+}
+
+function multiply(a, b) {
+    const out = new Float32Array(16);
+    for (let c = 0; c < 4; c++)
+        for (let r = 0; r < 4; r++) {
+            let s = 0;
+            for (let k = 0; k < 4; k++)
+                s += a[k * 4 + r] * b[c * 4 + k];
+            out[c * 4 + r] = s;
+        }
+    return out;
+}
+
+function rotationX(t) {
+    const c = Math.cos(t), s = Math.sin(t);
+    return new Float32Array([1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, 0, 0, 0, 1]);
+}
+
+function rotationY(t) {
+    const c = Math.cos(t), s = Math.sin(t);
+    return new Float32Array([c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, 0, 0, 0, 1]);
+}
+
+function translation(x, y, z) {
+    return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1]);
+}
+
+/* ---- the orbit camera ---------------------------------------------------------------------- */
+
+const camera = {yaw: 0.6, pitch: 0.45, distance: 60, autoRotate: true};
+const canvas = $('world');
+
+function cameraMatrices() {
+    const diagonal = frame ? Math.hypot(frame.X, frame.Y, frame.Z) : 32;
+    const view = multiply(translation(0, 0, -camera.distance),
+                          multiply(rotationX(camera.pitch), rotationY(camera.yaw)));
+    const proj = perspective(0.8, canvas.width / Math.max(1, canvas.height), 0.5, 20 * diagonal);
+    return {view, proj};
+}
+
+function fitCamera(f) {
+    camera.distance = 1.6 * Math.hypot(f.X, f.Y, f.Z);
+}
+
+let drag = null;  /* while a button is down: where the pointer was, and whether it moved */
+
+canvas.addEventListener('pointerdown', e => {
+    if (e.button !== 0)  /* the left button only: the right one opens the browser's menu */
+        return;
+    drag = {x: e.clientX, y: e.clientY, moved: false};
+    canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointermove', e => {
+    if (!drag)
+        return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (!drag.moved && Math.hypot(dx, dy) < 4)
+        return;
+    drag.moved = true;
+    camera.autoRotate = false;
+    camera.yaw += dx * 0.008;
+    camera.pitch = Math.max(-1.5, Math.min(1.5, camera.pitch + dy * 0.008));
+    drag.x = e.clientX;
+    drag.y = e.clientY;
+    needsDraw = true;
+});
+canvas.addEventListener('pointerup', e => {
+    if (drag && !drag.moved)
+        clickAt(e);
+    drag = null;
+});
+canvas.addEventListener('pointercancel', () => { drag = null; });
+canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    const diagonal = frame ? Math.hypot(frame.X, frame.Y, frame.Z) : 32;
+    camera.distance = Math.max(2, Math.min(10 * diagonal, camera.distance * Math.exp(e.deltaY * 0.0012)));
+    needsDraw = true;
+}, {passive: false});
+
+/* ---- WebGL --------------------------------------------------------------------------------- */
+
+let gl = canvas.getContext('webgl2', {antialias: true});
+let instancing = null;  /* the two instancing calls, from WebGL2 or from ANGLE_instanced_arrays */
+if (gl) {
+    instancing = {divisor: (i, d) => gl.vertexAttribDivisor(i, d),
+                  draw: (mode, first, count, n) => gl.drawArraysInstanced(mode, first, count, n)};
+} else {
+    gl = canvas.getContext('webgl', {antialias: true});
+    const ext = gl && gl.getExtension('ANGLE_instanced_arrays');
+    if (ext)
+        instancing = {divisor: (i, d) => ext.vertexAttribDivisorANGLE(i, d),
+                      draw: (mode, first, count, n) => ext.drawArraysInstancedANGLE(mode, first, count, n)};
+    else
+        gl = null;
+}
+
+/* The cubes: a unit cube with normals, placed and coloured per instance, lit by a lamp that
+   stays with the viewer. With u_pick on, every cube paints its pick colour instead. */
+const CUBE_VS = `
+attribute vec3 a_position; attribute vec3 a_normal;
+attribute vec3 a_offset; attribute vec3 a_colour; attribute vec3 a_pick;
+uniform mat4 u_proj; uniform mat4 u_view; uniform float u_half;
+varying vec3 v_colour; varying vec3 v_pick;
+void main() {
+    vec3 n = mat3(u_view) * a_normal;
+    float diffuse = max(dot(n, normalize(vec3(0.3, 0.8, 0.7))), 0.0);
+    v_colour = a_colour * (0.55 + 0.45 * diffuse);
+    v_pick = a_pick;
+    gl_Position = u_proj * u_view * vec4(a_position * u_half + a_offset, 1.0);
+}`;
+const CUBE_FS = `
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+varying vec3 v_colour; varying vec3 v_pick; uniform float u_pick;
+void main() { gl_FragColor = vec4(u_pick > 0.5 ? v_pick : v_colour, 1.0); }`;
+
+/* The flat things: the floor, the sun plane, the world's box and the outline of the picked
+   voxel, all the unit cube scaled and moved, in one colour. */
+const FLAT_VS = `
+attribute vec3 a_position;
+uniform mat4 u_proj; uniform mat4 u_view; uniform vec3 u_scale; uniform vec3 u_offset;
+void main() { gl_Position = u_proj * u_view * vec4(a_position * u_scale + u_offset, 1.0); }`;
+const FLAT_FS = `
+precision mediump float;
+uniform vec4 u_colour;
+void main() { gl_FragColor = u_colour; }`;
+
+function compileShader(type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS))
+        throw new Error('shader: ' + gl.getShaderInfoLog(shader));
+    return shader;
+}
+
+/* a program with its attribute and uniform locations by name (a_* and u_*) */
+function makeProgram(vs, fs) {
+    const program = gl.createProgram();
+    gl.attachShader(program, compileShader(gl.VERTEX_SHADER, vs));
+    gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS))
+        throw new Error('program: ' + gl.getProgramInfoLog(program));
+    const p = {program};
+    for (const name of (vs + fs).match(/\b[au]_\w+/g))
+        p[name] = name[0] === 'a' ? gl.getAttribLocation(program, name) : gl.getUniformLocation(program, name);
+    return p;
+}
+
+/* the unit cube as 12 triangles, each vertex its position (-1 .. 1) and its face's normal */
+function cubeMesh() {
+    const out = [], corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+    for (const n of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+        const u = [n[1], n[2], n[0]];  /* two directions across the face */
+        const w = [n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0]];
+        for (const i of [0, 1, 2, 0, 2, 3]) {
+            const c = corners[i];
+            for (let a = 0; a < 3; a++)
+                out.push(n[a] + u[a] * c[0] + w[a] * c[1]);
+            out.push(n[0], n[1], n[2]);
+        }
+    }
+    return new Float32Array(out);
+}
+
+/* the 12 edges of the unit cube as 24 line ends */
+function cubeEdges() {
+    const out = [];
+    for (let a = 0; a < 8; a++)
+        for (let b = a + 1; b < 8; b++)
+            if (a === (b ^ 1) || a === (b ^ 2) || a === (b ^ 4))
+                for (const c of [a, b])
+                    out.push(c & 1 ? 1 : -1, c & 2 ? 1 : -1, c & 4 ? 1 : -1);
+    return new Float32Array(out);
+}
+
+let cubeProg, flatProg, meshBuf, edgeBuf, instanceBuf;
+const pick = {fb: null, width: 0, height: 0};
+
+function initGL() {
+    cubeProg = makeProgram(CUBE_VS, CUBE_FS);
+    flatProg = makeProgram(FLAT_VS, FLAT_FS);
+    meshBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, meshBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, cubeMesh(), gl.STATIC_DRAW);
+    edgeBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, edgeBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, cubeEdges(), gl.STATIC_DRAW);
+    instanceBuf = gl.createBuffer();
+    gl.enable(gl.DEPTH_TEST);
+}
+
+/* the offscreen framebuffer for picking, the canvas's size */
+function ensurePickBuffer() {
+    if (pick.fb && pick.width === canvas.width && pick.height === canvas.height)
+        return;
+    if (pick.fb) {
+        gl.deleteFramebuffer(pick.fb);
+        gl.deleteTexture(pick.tex);
+        gl.deleteRenderbuffer(pick.depth);
+    }
+    pick.width = canvas.width;
+    pick.height = canvas.height;
+    pick.tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, pick.tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, pick.width, pick.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    pick.depth = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, pick.depth);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, pick.width, pick.height);
+    pick.fb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, pick.fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, pick.tex, 0);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, pick.depth);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+function drawCubes(m, picking) {
+    const p = cubeProg;
+    gl.useProgram(p.program);
+    gl.uniformMatrix4fv(p.u_proj, false, m.proj);
+    gl.uniformMatrix4fv(p.u_view, false, m.view);
+    gl.uniform1f(p.u_half, 0.42);
+    gl.uniform1f(p.u_pick, picking ? 1 : 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, meshBuf);
+    gl.enableVertexAttribArray(p.a_position);
+    gl.vertexAttribPointer(p.a_position, 3, gl.FLOAT, false, 24, 0);
+    gl.enableVertexAttribArray(p.a_normal);
+    gl.vertexAttribPointer(p.a_normal, 3, gl.FLOAT, false, 24, 12);
+    gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuf);
+    if (instancesDirty) {
+        gl.bufferData(gl.ARRAY_BUFFER, instances.subarray(0, instanceCount * STRIDE), gl.DYNAMIC_DRAW);
+        instancesDirty = false;
+    }
+    for (const [name, offset] of [['a_offset', 0], ['a_colour', 12], ['a_pick', 24]]) {
+        gl.enableVertexAttribArray(p[name]);
+        gl.vertexAttribPointer(p[name], 3, gl.FLOAT, false, STRIDE * 4, offset);
+        instancing.divisor(p[name], 1);
+    }
+    instancing.draw(gl.TRIANGLES, 0, 36, instanceCount);
+    for (const name of ['a_offset', 'a_colour', 'a_pick']) {
+        instancing.divisor(p[name], 0);
+        gl.disableVertexAttribArray(p[name]);
+    }
+    gl.disableVertexAttribArray(p.a_position);
+    gl.disableVertexAttribArray(p.a_normal);
+}
+
+/* the unit cube (TRIANGLES from the mesh) or its edges (LINES), scaled, moved and coloured */
+function drawFlat(m, mode, scale, offset, colour) {
+    const p = flatProg, edges = mode === gl.LINES;
+    gl.useProgram(p.program);
+    gl.uniformMatrix4fv(p.u_proj, false, m.proj);
+    gl.uniformMatrix4fv(p.u_view, false, m.view);
+    gl.uniform3fv(p.u_scale, scale);
+    gl.uniform3fv(p.u_offset, offset);
+    gl.uniform4fv(p.u_colour, colour);
+    gl.bindBuffer(gl.ARRAY_BUFFER, edges ? edgeBuf : meshBuf);
+    gl.enableVertexAttribArray(p.a_position);
+    gl.vertexAttribPointer(p.a_position, 3, gl.FLOAT, false, edges ? 12 : 24, 0);
+    gl.drawArrays(mode, 0, edges ? 24 : 36);
+    gl.disableVertexAttribArray(p.a_position);
+}
+
+/* the sun plane's light for a clock value: a triangle wave, 0 .. 254 (gamma_sun) */
+function sun(clock) {
+    return 2 * (clock < 128 ? clock : 255 - clock);
+}
+
+function draw() {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(0.067, 0.067, 0.078, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    if (!frame)
+        return;
+    const f = frame, m = cameraMatrices(), hx = f.X / 2, hy = f.Y / 2, hz = f.Z / 2;
+    drawFlat(m, gl.TRIANGLES, [hx, 0.05, hy], [0, -hz, 0], [0.13, 0.13, 0.16, 1]);  /* the floor */
+    drawFlat(m, gl.LINES, [hx, hz, hy], [0, 0, 0], [0.3, 0.3, 0.36, 1]);  /* the world's box */
+    drawCubes(m, false);
+    if (picked >= 0) {
+        const x = picked & (f.X - 1), y = picked >> f.xbits & (f.Y - 1), z = picked >> (f.xbits + f.ybits);
+        drawFlat(m, gl.LINES, [0.6, 0.6, 0.6], offsetOf(f, x, y, z), [1, 1, 1, 1]);
+    }
+    const light = 0.15 + 0.85 * sun(f.clock) / 254;  /* the sun plane, translucent, drawn last */
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.depthMask(false);
+    drawFlat(m, gl.TRIANGLES, [hx, 0.05, hy], [0, hz, 0], [light, 0.92 * light, 0.5 * light, 0.28]);
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+}
+
+/* Which voxel is under the pixel (px, py counted from the bottom left): the cubes are drawn once
+   more into the offscreen buffer with their pick colours, and the one pixel read back. */
+function pickAt(px, py) {
+    ensurePickBuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, pick.fb);
+    gl.viewport(0, 0, pick.width, pick.height);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    drawCubes(cameraMatrices(), true);
+    const rgba = new Uint8Array(4);
+    gl.readPixels(px, py, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const id = rgba[0] | rgba[1] << 8 | rgba[2] << 16;
+    return id === 0 ? -1 : instanceVoxel[id - 1];
+}
+
+function clickAt(e) {
+    if (!gl || !frame || instanceCount === 0)
+        return;
+    const rect = canvas.getBoundingClientRect();
+    const px = Math.floor((e.clientX - rect.left) * canvas.width / rect.width);
+    const py = Math.floor((rect.bottom - e.clientY) * canvas.height / rect.height);
+    picked = pickAt(px, py);
+    buildInstances(frame);
+    if (picked < 0)
+        cellEl.textContent = 'nothing picked';
+    else
+        fetchCell(picked);
+}
+
+/* the canvas at the screen's resolution, when its box changed */
+function resizeCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+    const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+    if (w !== canvas.width || h !== canvas.height) {
+        canvas.width = w;
+        canvas.height = h;
+        needsDraw = true;
+    }
+}
+
+/* at most one draw per animation frame, and only when something changed */
+function animate() {
+    if (gl) {
+        resizeCanvas();
+        if (camera.autoRotate) {
+            camera.yaw += 0.003;
+            needsDraw = true;
+        }
+        if (needsDraw) {
+            needsDraw = false;
+            draw();
+        }
+    }
+    requestAnimationFrame(animate);
+}
+
+/* ---- start --------------------------------------------------------------------------------- */
+
+buildLegend();
+if (gl) {
+    try {
+        initGL();
+    } catch (e) {
+        gl = null;
+        setStatus(e.message, true);
+    }
+}
+if (!gl)
+    $('noGL').hidden = false;
+window.addEventListener('resize', () => { needsDraw = true; });
+poll();
+animate();
+</script>
+</body>
+</html>
